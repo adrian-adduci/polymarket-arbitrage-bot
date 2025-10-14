@@ -41,6 +41,9 @@ ENABLE_BACKRUN=true
 - Monitor gas strategy and MEV behavior in controlled tests
 - Use multiple wallets to manage nonce and concurrency
 
+## How it works
+https://x.com/vladmeer67/status/1978055022459146731
+
 ## Contact
 
 ### Telegram: [Vladmeer](https://t.me/vladmeer67)    
