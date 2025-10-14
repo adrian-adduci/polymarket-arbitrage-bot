@@ -1,6 +1,7 @@
 # 🎯 BNB Sniper Bot — Pancake and Four.meme
 
 Sniper bots buy new DEX tokens instantly, crucial for BNB Chain where meme coins pump 20x in hours. Built-in filters target high-potential assets. Example: $HORIA trade turned 2 BNB into 9.4 BNB
+<img width="720" height="335" alt="image" src="https://github.com/user-attachments/assets/0dafeedb-3f5e-4283-a483-f7f85171e509" />
 
 ## Features
 
