@@ -1,113 +1,48 @@
-# Pumpfun Bundler v1
+# 🎯 BNB Sniper Bot — Pancake and Four.meme
 
-## Overview
+Sniper bots buy new DEX tokens instantly, crucial for BNB Chain where meme coins pump 20x in hours. Built-in filters target high-potential assets. Example: $HORIA trade turned 2 BNB into 9.4 BNB
 
-This is the best, fastest, and most efficient self-bundling script for PumpFun, allowing you to create a token and buy tokens with your own 20 different wallets in one single bundle.
+## Features
 
-## Installation
-`
-npm i pumpdotfun-sdk
-`
+- Real-time token detection from four.meme factory
+- Mempool monitoring for 0-block sniping
+- Optional MEV strategies (front-run / back-run)
+- Instant auto-buy with retry & exponential backoff
+- Dynamic gas pricing and gas limit controls
+- Configurable slippage protection
+- Structured logging (Winston) with file rotation
 
-## Usage Example
+## Minimal .env (examples)
 
-First you need to create a `.env` file and set your RPC URL like in the `.env.example`
+BSC_RPC_URL=https://bsc-dataseed.binance.org/
+BSC_WSS_URL=wss://bsc-dataseed.binance.org/
 
-Then you need to fund an account with atleast 0.004 SOL that is generated when running the command below
-To launch your token on Pumpfun site, edit the metadata as desired.
-```typescript
-    const metadata = {
-      "name": "B@mbi",
-      "symbol": "Bam",
-      "description": "Bambi's token",
-      "image": "./upload/img.jpg",
-      "showName": true,
-      "createdOn": "https://pump.fun",
-      "twitter": "https://x.com/bambi",
-      "telegram": "https://t.me/bambi",
-      "website": "https://bambi"
-}
-```
-`
-npx ts-node example/basic/index.ts
-`
-You can check token launch and bundling in this link:
-  - pumpfun site
-    https://pump.fun/2q4JLenwD1cRhzSLu3uPMQPw4fTEYp7bLtfmBwFLb48v
-  - solscan.io
-    ![alt text](image.png)
+WALLET=0x...
+BUY_AMOUNT=0.01
+SLIPPAGE_BPS=100
+GAS_LIMIT=500000
 
-### PumpDotFunSDK Class
+ENABLE_FRONTRUN=true
+ENABLE_BACKRUN=true
 
-The `PumpDotFunSDK` class provides methods to interact with the PumpFun protocol. Below are the method signatures and their descriptions.
+## Security & Risk Notice
 
-#### createAndBuy
+- This software is provided for educational purposes. Use at your own risk.
+- Never commit private keys; keep .env private
+- Test thoroughly on testnet before mainnet use
+- Failed transactions consume gas — financial loss possible
+- New tokens can be malicious (honeypots, rug pulls)
 
-```typescript
-async createAndBuy(
-  creator: Keypair,
-  mint: Keypair,
-  createTokenMetadata: CreateTokenMetadata,
-  buyAmountSol: bigint,
-  slippageBasisPoints: bigint = 500n,
-  priorityFees?: PriorityFee,
-  commitment: Commitment = DEFAULT_COMMITMENT,
-  finality: Finality = DEFAULT_FINALITY
-): Promise<TransactionResult>
-```
+## Best Practices / Performance Tips
 
-- Creates a new token and buys it.
-- **Parameters**:
-  - `creator`: The keypair of the token creator.
-  - `mint`: The keypair of the mint account.
-  - `createTokenMetadata`: Metadata for the token.
-  - `buyAmountSol`: Amount of SOL to buy.
-  - `slippageBasisPoints`: Slippage in basis points (default: 500).
-  - `priorityFees`: Priority fees (optional).
-  - `commitment`: Commitment level (default: DEFAULT_COMMITMENT).
-  - `finality`: Finality level (default: DEFAULT_FINALITY).
-- **Returns**: A promise that resolves to a `TransactionResult`.
+- Use premium RPC (QuickNode, Ankr) and WSS for mempool access
+- Start with small buy amounts on testnet
+- Monitor gas strategy and MEV behavior in controlled tests
+- Use multiple wallets to manage nonce and concurrency
 
-### Running the Examples
+## Contact
 
-#### Basic Example
-
-To run the basic example for creating, buying, and selling tokens, use the following command:
-
-```bash
-npx ts-node example/basic/index.ts
-```
-
-## Contributing
-
-We welcome contributions! Please submit a pull request or open an issue to discuss any changes.
-
-## License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
----
-
-## Pumpfun bundler V2
-
-### I made pumpfun bundler version 2 ###
-Create and buy with 20 wallets in a single bundle
-Example:
-https://explorer.jito.wtf/bundle/28d842bef7c919cee00798cee05bb15616bdf96574a8428a27b81c71252342e0
-
-## Pumpfun bundler V3
-
-###u Update code with new IDL
-Generate 20 wallets and run the buy action for each. Use the menu to advance through the steps manually.
-Example:
-https://explorer.jito.wtf/bundle/97408c8ebf1907b799041e5e78dda2c3bebdc7119197beb2dd62b0c7d3d4639e
-
-https://github.com/user-attachments/assets/8c322fb0-60bd-470e-b568-2da227fa5cbc
-
-
-# 👤 Author
-
-### Telegram: [Vladmeer](https://t.me/vladmeer67)   
+### Telegram: [Vladmeer](https://t.me/vladmeer67)    
 https://t.me/vladmeer67
 
 ### Twitter: [Vladmeer](https://x.com/vladmeer67)   
