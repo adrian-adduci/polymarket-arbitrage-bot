@@ -202,6 +202,11 @@ I've also developed a trading bot for Polymarket built with **Rust**.
 <img width="1917" height="942" alt="image (21)" src="https://github.com/user-attachments/assets/08a5c962-7f8b-4097-98b6-7a457daa37c9" />
 https://www.youtube.com/watch?v=4f6jHT4-DQs
 
+## Recommend VPS
+
+Vps: [@TradingVps](https://app.tradingvps.io/aff.php?aff=57)
+<img width="890" height="595" alt="534038982-fb311b59-05a6-477a-a8f0-5e8291acf1eb" src="https://github.com/user-attachments/assets/72966dac-3faa-4e93-941e-a34026d59822" />
+
 **Disclaimer:** This software is for educational purposes only. Trading involves risk of loss. The developers are not responsible for any financial losses incurred while using this bot.
 
 **Support:** For questions or issues, contact via Telegram: [@Vladmeer](https://t.me/vladmeer67) | Twitter: [@Vladmeer](https://x.com/vladmeer67)
