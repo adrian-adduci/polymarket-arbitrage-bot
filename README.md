@@ -41,6 +41,7 @@ View real-time orderbook data (read-only, no trading):
 python apps/orderbook_viewer.py --coin ETH
 
 ```
+<img width="690" height="476" alt="image (1)" src="https://github.com/user-attachments/assets/83621505-41e7-4b5a-90fd-3c84d1610291" />
 
 **Note:** Orderbook viewer doesn't require credentials - it's a read-only monitoring tool.
 
@@ -53,6 +54,7 @@ Run the automated trading strategy:
 python apps/flash_crash_runner.py --coin ETH
 
 ```
+<img width="693" height="401" alt="image (2)" src="https://github.com/user-attachments/assets/d5ccffc8-20c5-4cd1-9c3b-679099b22899" />
 
 **Note:** Flash crash strategy requires `POLY_PRIVATE_KEY` and `POLY_PROXY_WALLET` environment variables.
 
