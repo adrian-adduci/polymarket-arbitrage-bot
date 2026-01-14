@@ -2,24 +2,8 @@
 
 Production-ready Python trading bot for Polymarket with gasless transactions and real-time WebSocket orderbook streaming.
 
-## Features
+Forked From: https://x.com/vladmeer67 
 
-- **Gasless Trading** - Builder Program integration for zero gas fees
-- **Real-time WebSocket** - Live orderbook updates and market data
-- **15-Minute Markets** - Built-in support for BTC/ETH/SOL/XRP markets
-- **Flash Crash Strategy** - Pre-built volatility trading strategy
-- **Secure Storage** - PBKDF2 + Fernet encrypted private key storage
-- **Simple API** - Clean, intuitive Python interface
-
-## Quick Start
-
-### Installation
-
-```bash
-git clone https://github.com/vladmeer/polymarket-arbitrage-bot.git
-cd polymarket-arbitrage-bot
-pip install -r requirements.txt
-```
 
 ### Configuration
 
@@ -191,22 +175,6 @@ Private keys are encrypted using PBKDF2 (480,000 iterations) + Fernet symmetric 
 | Order failed | Check sufficient balance |
 | WebSocket errors | Verify network/firewall settings |
 
-## License
-
-MIT License - see [LICENSE](LICENSE) file for details.
-
-## Trading tool
-
-I've also developed a trading bot for Polymarket built with **Rust**.
-
-<img width="1917" height="942" alt="image (21)" src="https://github.com/user-attachments/assets/08a5c962-7f8b-4097-98b6-7a457daa37c9" />
-https://www.youtube.com/watch?v=4f6jHT4-DQs
-
-## Recommend VPS
-
-Vps: [@TradingVps](https://app.tradingvps.io/aff.php?aff=57)
-<img width="890" height="595" alt="534038982-fb311b59-05a6-477a-a8f0-5e8291acf1eb" src="https://github.com/user-attachments/assets/72966dac-3faa-4e93-941e-a34026d59822" />
-
 ## Version 2 - Dutch Book Arbitrage Tool
 
 I built **Polymarket Dutch Book Arbitrage Bot** - An automated trading system that detects guaranteed-profit opportunities in Polymarket's binary markets. When UP + DOWN token prices sum to less than 1.0, the bot simultaneously buys both, locking in a risk-free profit. Real-time WebSocket monitoring with 5-40ms detection latency.
@@ -214,6 +182,3 @@ I built **Polymarket Dutch Book Arbitrage Bot** - An automated trading system th
 <img width="1083" height="647" alt="image (4)" src="https://github.com/user-attachments/assets/a1eb3b45-9d3a-4715-b815-a337cc62ad50" />
 If you need this tool, contact me.
 
-**Disclaimer:** This software is for educational purposes only. Trading involves risk of loss. The developers are not responsible for any financial losses incurred while using this bot.
-
-**Support:** For questions or issues, contact via Telegram: [@Vladmeer](https://t.me/vladmeer67) | Twitter: [@Vladmeer](https://x.com/vladmeer67)
