@@ -82,6 +82,7 @@ class MarketScanner(ThreadLocalSessionMixin):
         closed: bool = False,
         limit: int = 500,
         offset: int = 0,
+        order_by_liquidity: bool = False,
     ) -> List[Dict[str, Any]]:
         """
         Fetch markets from Gamma API.
@@ -91,6 +92,7 @@ class MarketScanner(ThreadLocalSessionMixin):
             closed: Include closed markets
             limit: Maximum markets to fetch
             offset: Pagination offset
+            order_by_liquidity: Sort by liquidity (highest first)
 
         Returns:
             List of market data dictionaries
@@ -101,6 +103,10 @@ class MarketScanner(ThreadLocalSessionMixin):
             "active": str(active).lower(),
             "closed": str(closed).lower(),
         }
+
+        if order_by_liquidity:
+            params["order"] = "liquidityNum"
+            params["ascending"] = "false"
 
         url = f"{self.host}/markets"
 
@@ -219,7 +225,7 @@ class MarketScanner(ThreadLocalSessionMixin):
         self,
         min_liquidity: float = 0,
         min_volume: float = 0,
-        max_markets: int = 2000,
+        max_markets: int = 10000,
     ) -> List[BinaryMarket]:
         """
         Get all active binary markets.

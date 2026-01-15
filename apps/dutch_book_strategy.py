@@ -26,6 +26,7 @@ Usage:
 
 import asyncio
 import time
+import uuid
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any
 
@@ -33,7 +34,6 @@ from lib.terminal_utils import log
 from lib.market_scanner import MarketScanner, BinaryMarket
 from lib.dutch_book_detector import DutchBookDetector, ArbitrageOpportunity
 from src.bot import TradingBot
-from src.client import ClobClient
 
 
 @dataclass
@@ -66,6 +66,7 @@ class ArbitragePosition:
     yes_filled: bool = False
     no_filled: bool = False
     entry_time: float = field(default_factory=time.time)
+    needs_review: bool = False  # Set when partial fill or timeout occurs
 
     @property
     def is_complete(self) -> bool:
@@ -106,6 +107,12 @@ class DutchBookConfig:
     dry_run: bool = False  # Log opportunities without trading
     order_timeout: float = 30.0  # Seconds to wait for order fill
 
+    # Risk management
+    max_total_exposure: float = 1000.0  # Maximum USD across all positions
+    max_daily_loss: float = 100.0  # Stop trading after this loss amount
+    price_buffer_percent: float = 0.02  # 2% buffer above ask price (instead of fixed +0.01)
+    fill_check_interval: float = 1.0  # Seconds between fill status checks
+
 
 class DutchBookStrategy:
     """
@@ -134,12 +141,8 @@ class DutchBookStrategy:
             min_liquidity=config.min_liquidity,
         )
 
-        # CLOB client for orderbook queries
-        self.clob = ClobClient(
-            host="https://clob.polymarket.com",
-            chain_id=137,
-            funder=bot.safe_address,
-        )
+        # Concurrency control for orderbook fetching
+        self.orderbook_semaphore = asyncio.Semaphore(20)  # Max 20 concurrent requests
 
         # State
         self.running = False
@@ -151,14 +154,180 @@ class DutchBookStrategy:
         self.trades_executed = 0
         self.total_profit = 0.0
 
+        # Risk tracking
+        self.daily_pnl: float = 0.0
+        self.daily_start_time: float = time.time()
+
     @property
     def can_open_position(self) -> bool:
         """Check if we can open a new arbitrage position."""
         return len(self.positions) < self.config.max_concurrent_arbs
 
+    def _reset_daily_stats_if_needed(self) -> None:
+        """Reset daily stats at midnight UTC."""
+        current_day = int(time.time() // 86400)
+        start_day = int(self.daily_start_time // 86400)
+
+        if current_day > start_day:
+            log("New trading day - resetting daily stats", "info")
+            self.daily_pnl = 0.0
+            self.daily_start_time = time.time()
+
+    def get_current_exposure(self) -> float:
+        """Calculate total current exposure across all positions."""
+        return sum(
+            p.yes_size * p.yes_entry_price + p.no_size * p.no_entry_price
+            for p in self.positions.values()
+        )
+
+    def _check_exposure_limits(self, opportunity: ArbitrageOpportunity, size: float) -> bool:
+        """
+        Verify trade doesn't exceed exposure or loss limits.
+
+        Returns True if trade is allowed, False otherwise.
+        """
+        self._reset_daily_stats_if_needed()
+
+        # Check daily loss limit
+        if self.daily_pnl <= -self.config.max_daily_loss:
+            log(f"Daily loss limit reached: ${self.daily_pnl:.2f}", "warning")
+            return False
+
+        # Calculate current exposure
+        current_exposure = self.get_current_exposure()
+
+        # Calculate new trade exposure
+        new_exposure = size * (opportunity.yes_ask + opportunity.no_ask)
+
+        # Check total exposure limit
+        total_exposure = current_exposure + new_exposure
+        if total_exposure > self.config.max_total_exposure:
+            log(
+                f"Exposure limit exceeded: ${total_exposure:.2f} > ${self.config.max_total_exposure:.2f}",
+                "warning"
+            )
+            return False
+
+        return True
+
+    def _calculate_order_price(self, base_price: float) -> float:
+        """
+        Calculate order price with percentage buffer above ask.
+
+        Buffer helps ensure fill by slightly overpaying.
+        Uses percentage instead of fixed value for better scaling.
+        """
+        buffer = base_price * self.config.price_buffer_percent
+        # Minimum buffer of 0.001 to handle very low prices
+        buffer = max(buffer, 0.001)
+        # Cap at 0.99 to stay within valid price range
+        return min(base_price + buffer, 0.99)
+
+    def _calculate_position_size(self, opportunity: ArbitrageOpportunity) -> float:
+        """
+        Calculate optimal position size for the arbitrage.
+
+        Strategy:
+        1. Start with trade budget (e.g., $10)
+        2. Calculate how many share-pairs we can afford
+        3. Cap at available liquidity
+
+        Returns:
+            Number of shares to buy of each side
+        """
+        # Calculate how many share-pairs the budget can buy
+        cost_per_pair = opportunity.yes_ask + opportunity.no_ask
+        shares_by_budget = self.config.trade_size / cost_per_pair
+
+        # Cap at available liquidity
+        shares = min(shares_by_budget, opportunity.max_size)
+
+        # Sanity check
+        if shares <= 0:
+            log(f"Invalid share calculation: {shares}", "warning")
+            return 0.0
+
+        return shares
+
+    async def _cancel_order_safely(self, order_id: Optional[str]) -> bool:
+        """Cancel an order safely, handling errors gracefully."""
+        if not order_id:
+            return False
+        try:
+            await self.bot.cancel_order(order_id)
+            log(f"Cancelled order: {order_id}", "info")
+            return True
+        except Exception as e:
+            log(f"Failed to cancel order {order_id}: {e}", "error")
+            return False
+
+    async def _verify_fills(self, position: ArbitragePosition) -> None:
+        """
+        Verify order fills with timeout.
+
+        Polls order status until both sides are filled or timeout.
+        On timeout, attempts to cancel unfilled orders and marks position for review.
+        """
+        start_time = time.time()
+
+        while time.time() - start_time < self.config.order_timeout:
+            # Check YES order status
+            if not position.yes_filled and position.yes_order_id:
+                try:
+                    yes_order = await self.bot.get_order(position.yes_order_id)
+                    if yes_order and yes_order.get("status") == "MATCHED":
+                        position.yes_filled = True
+                        log(f"YES order filled: {position.yes_order_id}", "success")
+                except Exception as e:
+                    log(f"Error checking YES order: {e}", "debug")
+
+            # Check NO order status
+            if not position.no_filled and position.no_order_id:
+                try:
+                    no_order = await self.bot.get_order(position.no_order_id)
+                    if no_order and no_order.get("status") == "MATCHED":
+                        position.no_filled = True
+                        log(f"NO order filled: {position.no_order_id}", "success")
+                except Exception as e:
+                    log(f"Error checking NO order: {e}", "debug")
+
+            # Check if both filled
+            if position.is_complete:
+                log(f"Arbitrage complete: {position.market_slug}", "success")
+                return
+
+            await asyncio.sleep(self.config.fill_check_interval)
+
+        # Timeout reached - handle partial fills
+        await self._handle_partial_fill(position)
+
+    async def _handle_partial_fill(self, position: ArbitragePosition) -> None:
+        """Handle timeout with partial fills."""
+        log(f"Fill timeout for {position.market_slug}", "warning")
+
+        if position.yes_filled and not position.no_filled:
+            log("YES filled, NO unfilled - attempting to cancel NO", "warning")
+            await self._cancel_order_safely(position.no_order_id)
+            position.needs_review = True
+
+        elif position.no_filled and not position.yes_filled:
+            log("NO filled, YES unfilled - attempting to cancel YES", "warning")
+            await self._cancel_order_safely(position.yes_order_id)
+            position.needs_review = True
+
+        elif not position.yes_filled and not position.no_filled:
+            log("Both orders unfilled - cancelling both", "warning")
+            await self._cancel_order_safely(position.yes_order_id)
+            await self._cancel_order_safely(position.no_order_id)
+            # Remove position since no fills occurred
+            if position.market_slug in self.positions:
+                del self.positions[position.market_slug]
+
     async def scan_market(self, market: BinaryMarket) -> Optional[ArbitrageOpportunity]:
         """
         Scan a single market for arbitrage opportunity.
+
+        Uses async orderbook fetching with semaphore for concurrency control.
 
         Args:
             market: BinaryMarket to scan
@@ -167,9 +336,12 @@ class DutchBookStrategy:
             ArbitrageOpportunity if found, None otherwise
         """
         try:
-            # Fetch orderbooks for both sides
-            yes_book = self.clob.get_order_book(market.yes_token_id)
-            no_book = self.clob.get_order_book(market.no_token_id)
+            # Use semaphore to limit concurrent requests
+            async with self.orderbook_semaphore:
+                # Fetch both orderbooks concurrently using async bot method
+                yes_book_coro = self.bot.get_order_book(market.yes_token_id)
+                no_book_coro = self.bot.get_order_book(market.no_token_id)
+                yes_book, no_book = await asyncio.gather(yes_book_coro, no_book_coro)
 
             # Check for opportunity
             return self.detector.check_orderbooks(
@@ -183,12 +355,14 @@ class DutchBookStrategy:
                 outcomes=market.outcomes,
             )
         except Exception as e:
-            log(f"Error scanning {market.slug}: {e}", "error")
+            log(f"Error scanning {market.slug}: {e}", "debug")
             return None
 
     async def scan_all_markets(self) -> List[ArbitrageOpportunity]:
         """
         Scan all binary markets for arbitrage.
+
+        Uses batched concurrent requests for performance.
 
         Returns:
             List of arbitrage opportunities found
@@ -207,22 +381,39 @@ class DutchBookStrategy:
 
         log(f"Found {len(markets)} binary markets to scan", "info")
 
+        # Filter out markets where we already have positions
+        markets_to_scan = [m for m in markets if m.slug not in self.positions]
+
+        if not markets_to_scan:
+            log("No new markets to scan", "info")
+            return []
+
+        # Scan markets in batches for better progress indication
+        batch_size = 50
         opportunities = []
+        total_markets = len(markets_to_scan)
 
-        for market in markets:
-            self.markets_scanned += 1
+        for batch_start in range(0, total_markets, batch_size):
+            batch_end = min(batch_start + batch_size, total_markets)
+            batch = markets_to_scan[batch_start:batch_end]
 
-            # Skip if we already have position in this market
-            if market.slug in self.positions:
-                continue
+            # Show progress
+            log(f"Scanning markets {batch_start + 1}-{batch_end} of {total_markets}...", "info")
 
-            opportunity = await self.scan_market(market)
-            if opportunity:
-                opportunities.append(opportunity)
-                self.opportunities_found += 1
+            # Scan batch concurrently
+            tasks = [self.scan_market(market) for market in batch]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
 
-            # Small delay to avoid rate limiting
-            await asyncio.sleep(0.1)
+            # Process results
+            for market, result in zip(batch, results):
+                self.markets_scanned += 1
+
+                if isinstance(result, Exception):
+                    continue
+
+                if result is not None:
+                    opportunities.append(result)
+                    self.opportunities_found += 1
 
         if opportunities:
             log(f"Found {len(opportunities)} arbitrage opportunities!", "success")
@@ -235,7 +426,8 @@ class DutchBookStrategy:
         """
         Execute a Dutch Book arbitrage trade.
 
-        Places BUY orders on both YES and NO outcomes.
+        Places BUY orders on both YES and NO outcomes in parallel
+        to minimize race condition window.
 
         Args:
             opportunity: ArbitrageOpportunity to execute
@@ -256,59 +448,79 @@ class DutchBookStrategy:
             log("Max concurrent positions reached", "warning")
             return False
 
-        # Calculate sizes
-        # Split trade_size between YES and NO based on their prices
-        total_size = self.config.trade_size
-        yes_size = total_size / (2 * opportunity.yes_ask)  # Shares of YES
-        no_size = total_size / (2 * opportunity.no_ask)  # Shares of NO
+        # Calculate position size using simplified method
+        size = self._calculate_position_size(opportunity)
+        if size <= 0:
+            log(f"Invalid size calculated for {opportunity.market_slug}", "error")
+            return False
 
-        # Use minimum to ensure balanced position
-        size = min(yes_size, no_size, opportunity.max_size)
+        # Check exposure limits before executing
+        if not self._check_exposure_limits(opportunity, size):
+            return False
+
+        # Calculate prices with percentage buffer
+        yes_price = self._calculate_order_price(opportunity.yes_ask)
+        no_price = self._calculate_order_price(opportunity.no_ask)
 
         log(
             f"Executing arbitrage on {opportunity.market_slug}: "
-            f"YES @ {opportunity.yes_ask:.4f}, NO @ {opportunity.no_ask:.4f}, "
+            f"YES @ {yes_price:.4f}, NO @ {no_price:.4f}, "
             f"Size: {size:.2f} shares",
             "trade"
         )
 
-        # Place YES order
-        yes_result = await self.bot.place_order(
+        # Place both orders in parallel to minimize race condition window
+        yes_order_coro = self.bot.place_order(
             token_id=opportunity.yes_token_id,
-            price=opportunity.yes_ask + 0.01,  # Slightly above to ensure fill
+            price=yes_price,
             size=size,
             side="BUY"
         )
-
-        if not yes_result.success:
-            log(f"YES order failed: {yes_result.message}", "error")
-            return False
-
-        log(f"YES order placed: {yes_result.order_id}", "success")
-
-        # Place NO order
-        no_result = await self.bot.place_order(
+        no_order_coro = self.bot.place_order(
             token_id=opportunity.no_token_id,
-            price=opportunity.no_ask + 0.01,
+            price=no_price,
             size=size,
             side="BUY"
         )
 
-        if not no_result.success:
-            log(f"NO order failed: {no_result.message}", "error")
-            # Cancel YES order since we couldn't complete the arbitrage
-            try:
-                await self.bot.cancel_order(yes_result.order_id)
-                log("Cancelled YES order due to NO order failure", "warning")
-            except Exception:
-                log("Failed to cancel YES order - manual intervention needed!", "error")
+        # Execute in parallel
+        results = await asyncio.gather(yes_order_coro, no_order_coro, return_exceptions=True)
+        yes_result, no_result = results
+
+        # Handle exceptions from parallel execution
+        if isinstance(yes_result, Exception):
+            log(f"YES order exception: {yes_result}", "error")
+            yes_result = None
+        if isinstance(no_result, Exception):
+            log(f"NO order exception: {no_result}", "error")
+            no_result = None
+
+        # Analyze results
+        yes_success = yes_result is not None and yes_result.success
+        no_success = no_result is not None and no_result.success
+
+        # Handle failure scenarios
+        if not yes_success and not no_success:
+            log("Both orders failed", "error")
             return False
 
+        if yes_success and not no_success:
+            log(f"NO order failed, cancelling YES order", "warning")
+            await self._cancel_order_safely(yes_result.order_id)
+            return False
+
+        if no_success and not yes_success:
+            log(f"YES order failed, cancelling NO order", "warning")
+            await self._cancel_order_safely(no_result.order_id)
+            return False
+
+        # Both succeeded
+        log(f"YES order placed: {yes_result.order_id}", "success")
         log(f"NO order placed: {no_result.order_id}", "success")
 
-        # Create position
+        # Create position with unique ID (timestamp + UUID to prevent collision)
         position = ArbitragePosition(
-            id=f"arb-{int(time.time())}",
+            id=f"arb-{int(time.time())}-{uuid.uuid4().hex[:8]}",
             market_slug=opportunity.market_slug,
             question=opportunity.question,
             yes_token_id=opportunity.yes_token_id,
@@ -332,6 +544,9 @@ class DutchBookStrategy:
             f"Expected profit: ${expected_profit:.2f}",
             "success"
         )
+
+        # Start fill verification in background (non-blocking)
+        asyncio.create_task(self._verify_fills(position))
 
         return True
 

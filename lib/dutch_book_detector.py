@@ -170,10 +170,14 @@ class DutchBookDetector:
         if effective_profit < self.min_profit_margin:
             return None
 
-        # Check liquidity
-        max_size = min(yes_ask_size, no_ask_size) if yes_ask_size > 0 and no_ask_size > 0 else float('inf')
+        # Check liquidity - reject if either side has no size info
+        if yes_ask_size <= 0 or no_ask_size <= 0:
+            logger.debug(f"No liquidity available: YES={yes_ask_size}, NO={no_ask_size}")
+            return None
 
-        if max_size < self.min_liquidity and max_size != float('inf'):
+        max_size = min(yes_ask_size, no_ask_size)
+
+        if max_size < self.min_liquidity:
             logger.debug(f"Insufficient liquidity: {max_size:.2f} < {self.min_liquidity}")
             return None
 

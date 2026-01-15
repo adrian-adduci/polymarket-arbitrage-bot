@@ -48,14 +48,14 @@ class Colors:
     TRADE = MAGENTA
 
 
-# Log level configuration
+# Log level configuration (ASCII-safe for Windows console compatibility)
 LOG_SYMBOLS = {
-    "info": ("ℹ", Colors.BLUE),
-    "success": ("✓", Colors.GREEN),
-    "warning": ("⚠", Colors.YELLOW),
-    "error": ("✗", Colors.RED),
+    "info": ("i", Colors.BLUE),
+    "success": ("+", Colors.GREEN),
+    "warning": ("!", Colors.YELLOW),
+    "error": ("x", Colors.RED),
     "trade": ("$", Colors.MAGENTA),
-    "debug": ("·", Colors.DIM),
+    "debug": (".", Colors.DIM),
 }
 
 
@@ -77,7 +77,7 @@ def log(msg: str, level: str = "info", show_timestamp: bool = True) -> str:
         Formatted message string
     """
     formatted = format_log(msg, level, show_timestamp)
-    print(formatted)
+    print(formatted, flush=True)
     return formatted
 
 

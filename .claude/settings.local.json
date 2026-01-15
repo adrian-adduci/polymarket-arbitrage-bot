@@ -1,7 +1,9 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python:*)"
+      "Bash(python:*)",
+      "WebSearch",
+      "WebFetch(domain:www.quantvps.com)"
     ]
   }
 }

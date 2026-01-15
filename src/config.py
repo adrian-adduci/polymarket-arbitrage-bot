@@ -125,6 +125,50 @@ class RelayerConfig:
 
 
 @dataclass
+class VPSConfig:
+    """
+    VPS deployment configuration.
+
+    Environment Variables (all prefixed with POLY_):
+        LOG_FILE: Path to log file (None for console only)
+        LOG_FORMAT: "text" or "json"
+        HEALTH_PORT: HTTP health endpoint port
+        HEALTH_HOST: HTTP health endpoint bind address
+        HEARTBEAT_INTERVAL: Heartbeat update interval in seconds
+        PID_FILE: Path to PID file (optional)
+        GRACEFUL_SHUTDOWN_TIMEOUT: Max seconds to wait during shutdown
+    """
+    log_file: str = ""
+    log_format: str = "text"  # "text" or "json"
+    health_port: int = 8080
+    health_host: str = "127.0.0.1"
+    heartbeat_interval: int = 30
+    pid_file: str = ""
+    graceful_shutdown_timeout: int = 30
+
+    @classmethod
+    def from_env(cls) -> "VPSConfig":
+        """Load VPS configuration from environment variables."""
+        return cls(
+            log_file=get_env("LOG_FILE", ""),
+            log_format=get_env("LOG_FORMAT", "text"),
+            health_port=get_env_int("HEALTH_PORT", 8080),
+            health_host=get_env("HEALTH_HOST", "127.0.0.1"),
+            heartbeat_interval=get_env_int("HEARTBEAT_INTERVAL", 30),
+            pid_file=get_env("PID_FILE", ""),
+            graceful_shutdown_timeout=get_env_int("GRACEFUL_SHUTDOWN_TIMEOUT", 30),
+        )
+
+    def has_log_file(self) -> bool:
+        """Check if file logging is configured."""
+        return bool(self.log_file)
+
+    def has_pid_file(self) -> bool:
+        """Check if PID file is configured."""
+        return bool(self.pid_file)
+
+
+@dataclass
 class Config:
     """
     Main configuration class for the trading bot.
@@ -148,6 +192,9 @@ class Config:
     clob: ClobConfig = field(default_factory=ClobConfig)
     relayer: RelayerConfig = field(default_factory=RelayerConfig)
     builder: BuilderConfig = field(default_factory=BuilderConfig)
+
+    # VPS deployment configuration
+    vps: VPSConfig = field(default_factory=VPSConfig)
 
     # Trading defaults
     default_token_id: str = ""
@@ -267,13 +314,22 @@ class Config:
             DATA_DIR: Data directory for credentials
             LOG_LEVEL: Logging level
 
+        VPS Deployment Variables:
+            LOG_FILE: Path to log file (None for console only)
+            LOG_FORMAT: "text" or "json"
+            HEALTH_PORT: HTTP health endpoint port (default: 8080)
+            HEALTH_HOST: HTTP health endpoint bind address (default: 127.0.0.1)
+            HEARTBEAT_INTERVAL: Heartbeat update interval in seconds (default: 30)
+            PID_FILE: Path to PID file (optional)
+            GRACEFUL_SHUTDOWN_TIMEOUT: Max seconds to wait during shutdown (default: 30)
+
         Returns:
             Config instance
         """
         config = cls()
 
-        # Core settings
-        safe_address = get_env("PROXY_WALLET")
+        # Core settings - support both SAFE_ADDRESS and PROXY_WALLET
+        safe_address = get_env("SAFE_ADDRESS") or get_env("PROXY_WALLET")
         if safe_address:
             config.safe_address = safe_address
 
@@ -320,6 +376,9 @@ class Config:
         if default_price:
             config.default_price = default_price
 
+        # VPS deployment configuration
+        config.vps = VPSConfig.from_env()
+
         # Auto-detect gasless mode
         config.use_gasless = config.builder.is_configured()
 
@@ -343,8 +402,8 @@ class Config:
         else:
             config = cls()
 
-        # Override with environment variables
-        safe_address = get_env("PROXY_WALLET")
+        # Override with environment variables - support both SAFE_ADDRESS and PROXY_WALLET
+        safe_address = get_env("SAFE_ADDRESS") or get_env("PROXY_WALLET")
         if safe_address:
             config.safe_address = safe_address.lower()
 
@@ -372,6 +431,9 @@ class Config:
         if log_level:
             config.log_level = log_level.upper()
 
+        # VPS deployment configuration (always load from env)
+        config.vps = VPSConfig.from_env()
+
         # Re-check gasless mode
         config.use_gasless = config.builder.is_configured()
 
@@ -394,6 +456,7 @@ class Config:
             "clob": asdict(self.clob),
             "relayer": asdict(self.relayer),
             "builder": asdict(self.builder),
+            "vps": asdict(self.vps),
             "default_token_id": self.default_token_id,
             "default_size": self.default_size,
             "default_price": self.default_price,

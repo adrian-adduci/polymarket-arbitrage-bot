@@ -1,0 +1,53 @@
+[Unit]
+Description=Polymarket Arbitrage Trading Bot
+Documentation=https://github.com/your-repo/polymarket-arbitrage-bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=polybot
+Group=polybot
+WorkingDirectory=/opt/polymarket-bot
+
+# Environment configuration
+EnvironmentFile=/opt/polymarket-bot/.env
+
+# Start command - modify --live to --dry-run for testing
+ExecStart=/opt/polymarket-bot/venv/bin/python /opt/polymarket-bot/apps/dutch_book_runner.py --live
+
+# Stop signal
+ExecStop=/bin/kill -TERM $MAINPID
+TimeoutStopSec=30
+
+# Restart policy
+Restart=always
+RestartSec=10
+StartLimitBurst=5
+StartLimitIntervalSec=60
+
+# Logging (use journald)
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=polymarket-bot
+
+# Security hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/log/polymarket-bot /opt/polymarket-bot/data
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+
+# Resource limits
+MemoryMax=1G
+CPUQuota=80%
+TasksMax=50
+
+# Network isolation (allow only outbound)
+RestrictAddressFamilies=AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

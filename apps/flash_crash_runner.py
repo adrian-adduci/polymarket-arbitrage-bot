@@ -125,10 +125,11 @@ def main():
 
     # Check environment
     private_key = os.environ.get("POLY_PRIVATE_KEY")
-    safe_address = os.environ.get("POLY_PROXY_WALLET")
+    # Support both POLY_SAFE_ADDRESS and POLY_PROXY_WALLET for compatibility
+    safe_address = os.environ.get("POLY_SAFE_ADDRESS") or os.environ.get("POLY_PROXY_WALLET")
 
     if not private_key or not safe_address:
-        print(f"{Colors.RED}Error: POLY_PRIVATE_KEY and POLY_PROXY_WALLET must be set{Colors.RESET}")
+        print(f"{Colors.RED}Error: POLY_PRIVATE_KEY and POLY_SAFE_ADDRESS must be set{Colors.RESET}")
         print("Set them in .env file or export as environment variables")
         sys.exit(1)
 
