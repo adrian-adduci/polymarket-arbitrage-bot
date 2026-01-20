@@ -16,6 +16,7 @@ Example:
 
 import json
 import logging
+import time
 from dataclasses import dataclass
 from typing import Optional, List, Dict, Any
 
@@ -64,17 +65,19 @@ class MarketScanner(ThreadLocalSessionMixin):
 
     DEFAULT_HOST = "https://gamma-api.polymarket.com"
 
-    def __init__(self, host: str = DEFAULT_HOST, timeout: int = 30):
+    def __init__(self, host: str = DEFAULT_HOST, timeout: int = 30, max_retries: int = 2):
         """
         Initialize market scanner.
 
         Args:
             host: Gamma API host URL
             timeout: Request timeout in seconds
+            max_retries: Number of retry attempts on failure
         """
         super().__init__()
         self.host = host.rstrip("/")
         self.timeout = timeout
+        self.max_retries = max_retries
 
     def get_all_markets(
         self,
@@ -85,7 +88,7 @@ class MarketScanner(ThreadLocalSessionMixin):
         order_by_liquidity: bool = False,
     ) -> List[Dict[str, Any]]:
         """
-        Fetch markets from Gamma API.
+        Fetch markets from Gamma API with retry logic.
 
         Args:
             active: Filter for active markets
@@ -109,14 +112,25 @@ class MarketScanner(ThreadLocalSessionMixin):
             params["ascending"] = "false"
 
         url = f"{self.host}/markets"
+        last_error = None
 
-        try:
-            response = self.session.get(url, params=params, timeout=self.timeout)
-            response.raise_for_status()
-            return response.json()
-        except Exception as e:
-            logger.error(f"Failed to fetch markets: {e}")
-            return []
+        for attempt in range(self.max_retries + 1):
+            try:
+                if attempt > 0:
+                    # Exponential backoff: 2s, 4s, etc.
+                    backoff = 2 ** attempt
+                    logger.info(f"Retry {attempt}/{self.max_retries} for markets fetch (waiting {backoff}s)")
+                    time.sleep(backoff)
+
+                response = self.session.get(url, params=params, timeout=self.timeout)
+                response.raise_for_status()
+                return response.json()
+            except Exception as e:
+                last_error = e
+                logger.warning(f"Market fetch attempt {attempt + 1} failed: {e}")
+
+        logger.error(f"Failed to fetch markets after {self.max_retries + 1} attempts: {last_error}")
+        return []
 
     def get_all_active_markets(self, max_markets: int = 2000) -> List[Dict[str, Any]]:
         """

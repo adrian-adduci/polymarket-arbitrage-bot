@@ -63,12 +63,15 @@ class UpcomingMarket:
 class CryptoUpdownConfig:
     """Configuration for crypto updown scanner."""
 
+    # Only include assets that actually exist on Polymarket
+    # DOGE, ADA, AVAX, LINK return HTTP 404 (not available)
     assets: List[str] = field(default_factory=lambda: [
-        "btc", "eth", "sol", "xrp", "doge", "ada", "avax", "link"
+        "btc", "eth", "sol", "xrp"
     ])
     interval_seconds: int = 900  # 15 minutes (for backwards compatibility)
     host: str = "https://gamma-api.polymarket.com"
-    timeout: int = 10
+    timeout: int = 30  # Increased from 10 - BTC often needs more time
+    max_retries: int = 2  # Retry failed requests
 
 
 class CryptoUpdownScanner(ThreadLocalSessionMixin):
@@ -131,7 +134,7 @@ class CryptoUpdownScanner(ThreadLocalSessionMixin):
 
     def _fetch_event(self, slug: str) -> Optional[Dict[str, Any]]:
         """
-        Fetch event by slug from Gamma API.
+        Fetch event by slug from Gamma API with retry logic.
 
         Args:
             slug: Event slug
@@ -140,15 +143,41 @@ class CryptoUpdownScanner(ThreadLocalSessionMixin):
             Event data dict or None if not found
         """
         url = f"{self.config.host}/events/slug/{slug}"
-        try:
-            response = self.session.get(url, timeout=self.config.timeout)
-            if response.status_code == 200:
-                return response.json()
-            logger.debug(f"Event not found: {slug} (status: {response.status_code})")
-            return None
-        except Exception as e:
-            logger.debug(f"Failed to fetch event {slug}: {e}")
-            return None
+        last_error = None
+
+        for attempt in range(self.config.max_retries + 1):
+            try:
+                if attempt > 0:
+                    # Exponential backoff: 2s, 4s, etc.
+                    backoff = 2 ** attempt
+                    print(f"[DEBUG] Retry {attempt}/{self.config.max_retries} for {slug} (waiting {backoff}s)")
+                    time.sleep(backoff)
+
+                print(f"[DEBUG] Fetching: {url}")
+                response = self.session.get(url, timeout=self.config.timeout)
+                print(f"[DEBUG] Response: HTTP {response.status_code}")
+
+                if response.status_code == 200:
+                    return response.json()
+
+                # 404 means market doesn't exist - don't retry
+                if response.status_code == 404:
+                    print(f"[DEBUG] Event not found: {slug} (HTTP 404)")
+                    logger.warning(f"Event not found: {slug} (HTTP 404)")
+                    return None
+
+                # Other errors - might retry
+                print(f"[DEBUG] Unexpected status: {slug} (HTTP {response.status_code})")
+                last_error = f"HTTP {response.status_code}"
+
+            except Exception as e:
+                last_error = str(e)
+                print(f"[DEBUG] Error fetching {slug}: {e}")
+                # Continue to retry on network errors
+
+        # All retries exhausted
+        logger.warning(f"Failed to fetch event {slug} after {self.config.max_retries + 1} attempts: {last_error}")
+        return None
 
     def _parse_json_field(self, value: Any) -> List[Any]:
         """Parse a field that may be a JSON string or a list."""
@@ -227,16 +256,16 @@ class CryptoUpdownScanner(ThreadLocalSessionMixin):
 
             if event:
                 market = self._parse_market_from_event(event)
-                if market and market.accepting_orders:
+                if market:
+                    # Include market regardless of accepting_orders status
                     markets.append(market)
+                    status = "accepting orders" if market.accepting_orders else "NOT accepting orders"
                     logger.info(
-                        f"Found active {asset.upper()} 15m market: {market.question} "
-                        f"(Liquidity: ${market.liquidity:,.0f})"
+                        f"Found {asset.upper()} 15m market: {market.question} "
+                        f"({status}, Liquidity: ${market.liquidity:,.0f})"
                     )
-                elif market:
-                    logger.debug(f"{asset.upper()} 15m market not accepting orders")
             else:
-                logger.debug(f"No active {asset.upper()} 15m market found")
+                logger.warning(f"No {asset.upper()} 15m market found for slug: {slug}")
 
         return markets
 
