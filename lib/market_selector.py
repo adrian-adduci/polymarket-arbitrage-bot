@@ -11,24 +11,34 @@ Features:
 - Enter to confirm selection
 - Real-time filtering as you type
 
-Example:
-    from lib.market_selector import InteractiveMarketSelector
-    from lib.market_scanner import MarketScanner
+Unified Selection Modes:
+- INTERACTIVE: Full TUI with arrow keys and search
+- COIN_QUICK: Quick coin picker (BTC/ETH/SOL/XRP)
+- SEARCH: Keyword search
+- RECENT: Recently used markets
+- DIRECT: Direct token ID entry
 
-    scanner = MarketScanner()
+Example:
+    # Interactive mode (full TUI)
+    from lib.market_selector import InteractiveMarketSelector
     selector = InteractiveMarketSelector(scanner)
     await selector.fetch_markets()
     selected = await selector.run()
 
-    for market in selected:
-        print(f"Selected: {market.question}")
+    # Unified selector (all modes)
+    from lib.market_selector import UnifiedMarketSelector, MarketSelectionMode
+    selector = UnifiedMarketSelector(scanner)
+    markets = await selector.select(mode=MarketSelectionMode.INTERACTIVE)
 """
 
 import asyncio
+import json
 from dataclasses import dataclass, field
-from typing import List, Set, Optional, Callable
+from enum import Enum
+from pathlib import Path
+from typing import List, Set, Optional, Callable, Dict, Any
 
-from prompt_toolkit import Application
+from prompt_toolkit import Application, PromptSession
 from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.layout import Layout, HSplit, VSplit, Window, FormattedTextControl
@@ -445,3 +455,330 @@ def format_liquidity(liquidity: float) -> str:
         return f"${liquidity/1_000:.1f}K"
     else:
         return f"${liquidity:.0f}"
+
+
+# ============================================================================
+# Unified Market Selection
+# ============================================================================
+
+class MarketSelectionMode(Enum):
+    """Available modes for market selection."""
+
+    INTERACTIVE = "interactive"  # Full TUI with arrow keys
+    COIN_QUICK = "coin"          # Quick coin picker (BTC/ETH/SOL/XRP)
+    SEARCH = "search"            # Keyword search
+    RECENT = "recent"            # Recently used markets
+    DIRECT = "direct"            # Direct token ID entry
+
+
+# Common crypto coins for quick selection
+QUICK_COINS = ["BTC", "ETH", "SOL", "XRP", "DOGE", "ADA", "AVAX", "LINK"]
+
+
+class UnifiedMarketSelector:
+    """
+    Single interface for all market selection needs.
+
+    Provides multiple selection modes to suit different use cases:
+    - Interactive: Full TUI for browsing all markets
+    - Coin Quick: Fast selection for crypto up/down markets
+    - Search: Keyword-based search
+    - Recent: Show recently selected markets
+    - Direct: Enter token ID directly
+
+    Example:
+        selector = UnifiedMarketSelector(scanner)
+
+        # Interactive selection
+        markets = await selector.select(mode=MarketSelectionMode.INTERACTIVE)
+
+        # Quick coin selection for flash crash
+        markets = await selector.select(mode=MarketSelectionMode.COIN_QUICK)
+
+        # Search by keyword
+        markets = await selector.select(
+            mode=MarketSelectionMode.SEARCH,
+            filters={"query": "bitcoin"}
+        )
+
+        # Save selections to recent history
+        selector.save_recent(markets)
+    """
+
+    def __init__(
+        self,
+        scanner: MarketScanner,
+        recent_file: Optional[str] = None,
+    ):
+        """
+        Initialize unified market selector.
+
+        Args:
+            scanner: MarketScanner instance for fetching markets
+            recent_file: Path to recent markets file (default: data/recent_markets.json)
+        """
+        self.scanner = scanner
+        self.interactive = InteractiveMarketSelector(scanner)
+        self.recent_file = Path(recent_file or "data/recent_markets.json")
+        self._markets_cache: List[BinaryMarket] = []
+        self._recent_markets: List[Dict[str, Any]] = []
+        self._load_recent()
+
+    def _load_recent(self) -> None:
+        """Load recent markets from file."""
+        try:
+            if self.recent_file.exists():
+                with open(self.recent_file, "r") as f:
+                    self._recent_markets = json.load(f)
+        except Exception:
+            self._recent_markets = []
+
+    def _save_recent_file(self) -> None:
+        """Save recent markets to file."""
+        try:
+            self.recent_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.recent_file, "w") as f:
+                json.dump(self._recent_markets, f, indent=2)
+        except Exception:
+            pass  # Ignore save errors
+
+    async def fetch_markets(
+        self,
+        min_liquidity: float = 100.0,
+        include_crypto_updown: bool = True,
+    ) -> None:
+        """
+        Fetch available markets from API.
+
+        Args:
+            min_liquidity: Minimum liquidity filter
+            include_crypto_updown: Include crypto 15m up/down markets
+        """
+        await self.interactive.fetch_markets(
+            min_liquidity=min_liquidity,
+            include_crypto_updown=include_crypto_updown,
+        )
+        self._markets_cache = self.interactive.state.markets
+
+    async def select(
+        self,
+        mode: MarketSelectionMode = MarketSelectionMode.INTERACTIVE,
+        max_markets: int = 5,
+        filters: Optional[Dict[str, Any]] = None,
+    ) -> Optional[List[BinaryMarket]]:
+        """
+        Unified market selection entry point.
+
+        Args:
+            mode: Selection mode to use
+            max_markets: Maximum number of markets to select
+            filters: Mode-specific filters (e.g., query for SEARCH mode)
+
+        Returns:
+            List of selected markets, or None if cancelled
+        """
+        filters = filters or {}
+
+        # Ensure markets are fetched
+        if not self._markets_cache:
+            await self.fetch_markets()
+
+        if mode == MarketSelectionMode.INTERACTIVE:
+            return await self._interactive_select()
+
+        elif mode == MarketSelectionMode.COIN_QUICK:
+            return await self._coin_quick_select(max_markets)
+
+        elif mode == MarketSelectionMode.SEARCH:
+            query = filters.get("query", "")
+            return await self._search_select(query, max_markets)
+
+        elif mode == MarketSelectionMode.RECENT:
+            return await self._show_recent(max_markets)
+
+        elif mode == MarketSelectionMode.DIRECT:
+            token_ids = filters.get("token_ids", [])
+            return await self._direct_entry(token_ids)
+
+        return None
+
+    async def _interactive_select(self) -> Optional[List[BinaryMarket]]:
+        """Full interactive TUI selection."""
+        return await self.interactive.run()
+
+    async def _coin_quick_select(self, max_markets: int = 5) -> Optional[List[BinaryMarket]]:
+        """Quick selection for common crypto coins."""
+        from prompt_toolkit.shortcuts import checkboxlist_dialog
+
+        # Find markets for each coin
+        coin_markets: Dict[str, BinaryMarket] = {}
+        for market in self._markets_cache:
+            slug = market.slug.upper()
+            question = market.question.upper()
+            for coin in QUICK_COINS:
+                if coin in slug or coin in question:
+                    # Prefer updown markets (15-minute resolution)
+                    if coin not in coin_markets or "15" in market.slug:
+                        coin_markets[coin] = market
+
+        if not coin_markets:
+            print("No crypto markets found.")
+            return None
+
+        # Build choices
+        choices = []
+        for coin in QUICK_COINS:
+            if coin in coin_markets:
+                market = coin_markets[coin]
+                name = market.question[:40] + "..." if len(market.question) > 40 else market.question
+                choices.append((coin, f"{coin}: {name}"))
+
+        if not choices:
+            print("No matching crypto markets.")
+            return None
+
+        # Show checkbox dialog
+        result = await checkboxlist_dialog(
+            title="Quick Coin Selection",
+            text=f"Select up to {max_markets} coins (Space to toggle, Enter to confirm):",
+            values=choices,
+        ).run_async()
+
+        if not result:
+            return None
+
+        # Get selected markets
+        selected = [coin_markets[coin] for coin in result[:max_markets] if coin in coin_markets]
+        return selected if selected else None
+
+    async def _search_select(
+        self,
+        query: str,
+        max_markets: int = 5,
+    ) -> Optional[List[BinaryMarket]]:
+        """Search markets by keyword."""
+        session = PromptSession()
+
+        if not query:
+            query = await session.prompt_async("Enter search query: ")
+            query = query.strip()
+            if not query:
+                return None
+
+        query_lower = query.lower()
+        matches = [
+            m for m in self._markets_cache
+            if query_lower in m.question.lower() or query_lower in m.slug.lower()
+        ]
+
+        if not matches:
+            print(f"No markets found matching '{query}'")
+            return None
+
+        # Sort by liquidity
+        matches.sort(key=lambda m: m.liquidity, reverse=True)
+
+        # Show top matches
+        print(f"\nFound {len(matches)} markets matching '{query}':\n")
+        for i, market in enumerate(matches[:10]):
+            print(f"  [{i+1}] {market.question[:60]}")
+            print(f"      Liquidity: {format_liquidity(market.liquidity)}")
+
+        # Get selection
+        try:
+            selection = await session.prompt_async(f"\nEnter numbers to select (comma-separated, max {max_markets}): ")
+            indices = [int(x.strip()) - 1 for x in selection.split(",") if x.strip()]
+            selected = [matches[i] for i in indices if 0 <= i < len(matches)][:max_markets]
+            return selected if selected else None
+        except (ValueError, IndexError):
+            return None
+
+    async def _show_recent(self, max_markets: int = 5) -> Optional[List[BinaryMarket]]:
+        """Show recently selected markets."""
+        if not self._recent_markets:
+            print("No recent markets found.")
+            return None
+
+        print("\nRecent markets:\n")
+        for i, recent in enumerate(self._recent_markets[:10]):
+            print(f"  [{i+1}] {recent.get('question', 'Unknown')[:60]}")
+
+        try:
+            session = PromptSession()
+            selection = await session.prompt_async(f"\nEnter numbers to select (comma-separated, max {max_markets}): ")
+            indices = [int(x.strip()) - 1 for x in selection.split(",") if x.strip()]
+
+            # Find markets by slug
+            selected = []
+            for i in indices:
+                if 0 <= i < len(self._recent_markets):
+                    slug = self._recent_markets[i].get("slug")
+                    market = next((m for m in self._markets_cache if m.slug == slug), None)
+                    if market:
+                        selected.append(market)
+
+            return selected[:max_markets] if selected else None
+        except (ValueError, IndexError):
+            return None
+
+    async def _direct_entry(
+        self,
+        token_ids: Optional[List[str]] = None,
+    ) -> Optional[List[BinaryMarket]]:
+        """Enter token ID directly."""
+        if not token_ids:
+            session = PromptSession()
+            token_id = await session.prompt_async("Enter token ID (or market slug): ")
+            token_id = token_id.strip()
+            if not token_id:
+                return None
+            token_ids = [token_id]
+
+        selected = []
+        for tid in token_ids:
+            # Try to find by token_id or slug
+            for market in self._markets_cache:
+                if market.yes_token_id == tid or market.no_token_id == tid:
+                    selected.append(market)
+                    break
+                elif market.slug == tid:
+                    selected.append(market)
+                    break
+
+        return selected if selected else None
+
+    def save_recent(self, markets: List[BinaryMarket]) -> None:
+        """
+        Save selected markets to recent history.
+
+        Args:
+            markets: Markets to add to recent history
+        """
+        for market in markets:
+            entry = {
+                "slug": market.slug,
+                "question": market.question,
+                "timestamp": asyncio.get_event_loop().time() if asyncio.get_event_loop().is_running() else 0,
+            }
+
+            # Remove existing entry for this market
+            self._recent_markets = [
+                r for r in self._recent_markets
+                if r.get("slug") != market.slug
+            ]
+
+            # Add to front
+            self._recent_markets.insert(0, entry)
+
+        # Keep only last 20
+        self._recent_markets = self._recent_markets[:20]
+        self._save_recent_file()
+
+    def get_recent_markets(self) -> List[Dict[str, Any]]:
+        """Get list of recent market entries."""
+        return self._recent_markets.copy()
+
+    def clear_recent(self) -> None:
+        """Clear recent markets history."""
+        self._recent_markets = []
+        self._save_recent_file()

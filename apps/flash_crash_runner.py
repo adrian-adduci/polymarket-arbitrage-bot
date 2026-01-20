@@ -68,6 +68,102 @@ from src.config import Config
 from apps.flash_crash_strategy import FlashCrashStrategy, FlashCrashConfig
 
 
+class FlashCrashRunner:
+    """
+    Wrapper class for Flash Crash strategy (used by main.py).
+
+    Provides a unified interface with dry_run support.
+    """
+
+    def __init__(
+        self,
+        coin: str = "ETH",
+        config: FlashCrashConfig = None,
+        dry_run: bool = True,
+    ):
+        """
+        Initialize FlashCrashRunner.
+
+        Args:
+            coin: Coin symbol (BTC, ETH, SOL, XRP)
+            config: Optional FlashCrashConfig (will create default if None)
+            dry_run: If True, use mock bot (no real trades)
+        """
+        self.coin = coin.upper()
+        self.dry_run = dry_run
+
+        # Create config if not provided
+        if config is None:
+            self.config = FlashCrashConfig(
+                coin=self.coin,
+                size=5.0,
+                drop_threshold=0.30,
+            )
+        else:
+            self.config = config
+            # Ensure coin is set
+            self.config.coin = self.coin
+
+        self.strategy = None
+
+    async def run(self) -> None:
+        """Run flash crash monitoring."""
+        # Print header
+        print(f"\n{Colors.BOLD}{'='*60}{Colors.RESET}")
+        mode = "DRY RUN" if self.dry_run else "LIVE TRADING"
+        mode_color = Colors.YELLOW if self.dry_run else Colors.RED
+        print(f"{Colors.BOLD}  Flash Crash Strategy - {self.coin} ({mode_color}{mode}{Colors.RESET}{Colors.BOLD}){Colors.RESET}")
+        print(f"{Colors.BOLD}{'='*60}{Colors.RESET}\n")
+
+        print(f"Configuration:")
+        print(f"  Coin: {self.config.coin}")
+        print(f"  Size: ${self.config.size:.2f}")
+        print(f"  Drop threshold: {self.config.drop_threshold:.2f}")
+        print(f"  Take profit: +${self.config.take_profit:.2f}")
+        print(f"  Stop loss: -${self.config.stop_loss:.2f}")
+        print()
+
+        # Create bot (mock for dry run, real for live)
+        if self.dry_run:
+            bot = self._create_mock_bot()
+        else:
+            bot = self._create_real_bot()
+            if not bot or not bot.is_initialized():
+                print(f"{Colors.RED}Error: Failed to initialize bot{Colors.RESET}")
+                return
+
+        self.strategy = FlashCrashStrategy(bot=bot, config=self.config)
+        await self.strategy.run()
+
+    def _create_mock_bot(self):
+        """Create mock bot for dry run mode."""
+        from unittest.mock import Mock, AsyncMock
+
+        bot = Mock()
+        bot.config = Mock()
+        bot.config.safe_address = "0xDRY_RUN_ADDRESS"
+        bot.place_order = AsyncMock(return_value=Mock(
+            success=True,
+            order_id="dry_run_order",
+        ))
+        bot.cancel_order = AsyncMock(return_value=True)
+        bot.get_balance = Mock(return_value=1000.0)
+        bot.is_initialized = Mock(return_value=True)
+        return bot
+
+    def _create_real_bot(self):
+        """Create real trading bot."""
+        private_key = os.environ.get("POLY_PRIVATE_KEY")
+        safe_address = os.environ.get("POLY_SAFE_ADDRESS") or os.environ.get("POLY_PROXY_WALLET")
+
+        if not private_key or not safe_address:
+            print(f"{Colors.RED}Error: POLY_PRIVATE_KEY and POLY_SAFE_ADDRESS must be set{Colors.RESET}")
+            return None
+
+        config = Config.from_env()
+        return TradingBot(config=config, private_key=private_key)
+
+
 def main():
     """Main entry point."""
     parser = argparse.ArgumentParser(

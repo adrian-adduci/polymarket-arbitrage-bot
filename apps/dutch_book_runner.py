@@ -54,6 +54,7 @@ from lib.dashboard import MonitoringDashboard, DashboardConfig
 from lib.logging_config import setup_logging
 from lib.health_monitor import HealthMonitor
 from lib.signal_handler import GracefulShutdown
+from lib.wallet import WalletManager
 from src.config import Config
 
 
@@ -81,12 +82,14 @@ class InteractiveRunner:
         dry_run: bool = True,
         health_monitor: HealthMonitor = None,
         shutdown_handler: GracefulShutdown = None,
+        config: Config = None,
     ):
         self.trade_size = trade_size
         self.auto_threshold = auto_threshold
         self.min_profit = min_profit
         self.min_liquidity = min_liquidity
         self.dry_run = dry_run
+        self.config = config
 
         self.scanner = MarketScanner()
         self.monitor = None
@@ -97,19 +100,61 @@ class InteractiveRunner:
         self.health = health_monitor
         self.shutdown = shutdown_handler
 
+        # Wallet for balance display
+        self.wallet = None
+        if config and config.safe_address:
+            try:
+                self.wallet = WalletManager(
+                    address=config.safe_address,
+                    rpc_url=config.rpc_url,
+                )
+                # Set initial balance for P&L tracking
+                self.wallet.set_initial_balance()
+            except Exception as e:
+                log(f"Wallet init failed (balance display disabled): {e}", "warning")
+
         # Set health mode
         if self.health:
             self.health.set_mode("dry_run" if dry_run else "live")
 
     async def run(self) -> None:
-        """Main entry point."""
+        """Main entry point with loop for back-to-selection."""
         self._print_header()
 
         # Register cleanup callback for graceful shutdown
         if self.shutdown:
             self.shutdown.register(cleanup_callback=self._cleanup)
 
-        # Phase 1: Market Selection
+        # Main loop - allows returning to market selection
+        while True:
+            # Phase 1: Market Selection
+            selected = await self._select_markets()
+
+            if not selected:
+                log("No markets selected. Exiting.", "warning")
+                break
+
+            log(f"Selected {len(selected)} market(s):", "success")
+            for market in selected:
+                print(f"  - {market.question[:60]}")
+            print()
+
+            # Update health status
+            if self.health:
+                self.health.set_markets_monitored(len(selected))
+
+            # Phase 2: WebSocket Monitoring
+            should_continue = await self._run_monitor(selected)
+
+            if not should_continue:
+                break  # User wants to quit entirely
+
+            # Loop back to market selection
+            log("Returning to market selection...", "info")
+            print()
+
+    async def _select_markets(self):
+        """Run interactive market selection. Returns list of selected markets or None."""
         log("Fetching available markets...", "info")
         selector = InteractiveMarketSelector(self.scanner)
         await selector.fetch_markets(min_liquidity=self.min_liquidity)
@@ -120,28 +165,12 @@ class InteractiveRunner:
             log("No markets available. Check network connection.", "error")
             if self.health:
                 self.health.set_unhealthy("No markets available")
-            return
+            return None
 
         log("Opening market selector (use arrow keys, Space to select, Enter to confirm)...", "info")
         await asyncio.sleep(0.5)
 
-        selected = await selector.run()
-
-        if not selected:
-            log("No markets selected. Exiting.", "warning")
-            return
-
-        log(f"Selected {len(selected)} market(s):", "success")
-        for market in selected:
-            print(f"  - {market.question[:60]}")
-        print()
-
-        # Update health status
-        if self.health:
-            self.health.set_markets_monitored(len(selected))
-
-        # Phase 2: WebSocket Monitoring
-        await self._run_monitor(selected)
+        return await selector.run()
 
     def _cleanup(self) -> None:
         """Cleanup callback for graceful shutdown."""
@@ -162,10 +191,23 @@ class InteractiveRunner:
         print(f"Auto-trade threshold: {Colors.CYAN}{self.auto_threshold:.1%}{Colors.RESET}")
         print(f"Trade size: {Colors.CYAN}${self.trade_size:.2f}{Colors.RESET}")
         print(f"Min profit margin: {Colors.CYAN}{self.min_profit:.1%}{Colors.RESET}")
+
+        # Display wallet balance if available
+        if self.wallet:
+            try:
+                balance = self.wallet.get_usdc_balance()
+                print(f"Wallet balance: {Colors.CYAN}${balance.usdc_balance:,.2f}{Colors.RESET} USDC")
+            except Exception:
+                print(f"Wallet balance: {Colors.DIM}unavailable{Colors.RESET}")
+
         print()
 
-    async def _run_monitor(self, markets) -> None:
-        """Run WebSocket monitor on selected markets with real-time dashboard."""
+    async def _run_monitor(self, markets) -> bool:
+        """Run WebSocket monitor on selected markets with real-time dashboard.
+
+        Returns:
+            True if should loop back to market selection, False to exit program.
+        """
         log("Starting WebSocket monitor...", "info")
 
         self.monitor = FastMarketMonitor(
@@ -191,6 +233,7 @@ class InteractiveRunner:
             monitor=self.monitor,
             config=dashboard_config,
             shutdown_check=lambda: self.shutdown.should_exit if self.shutdown else False,
+            wallet=self.wallet,
         )
 
         @self.monitor.on_opportunity
@@ -218,13 +261,18 @@ class InteractiveRunner:
             # Run real-time dashboard instead of minimal display loop
             await self.dashboard.run()
         except KeyboardInterrupt:
-            pass
+            return False  # Full exit on Ctrl+C
         finally:
             self.dashboard.stop()
             await self.monitor.stop()
             if self.health:
                 self.health.set_websocket_connected(False)
             log("Monitor stopped.", "info")
+
+        # Check why dashboard exited
+        if self.dashboard.exit_reason == "back":
+            return True   # Loop back to market selection
+        return False      # Exit program (quit or other)
 
     async def _handle_opportunity(self, opp: ArbitrageOpportunity) -> None:
         """Handle detected opportunity."""
@@ -445,6 +493,7 @@ Examples:
                 dry_run=dry_run,
                 health_monitor=health,
                 shutdown_handler=shutdown,
+                config=config,
             )
             asyncio.run(runner.run())
     except KeyboardInterrupt:

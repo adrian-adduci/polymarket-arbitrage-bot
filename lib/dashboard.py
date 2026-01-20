@@ -17,12 +17,20 @@ Example:
 """
 
 import asyncio
+import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import List, Optional, Callable
 
 from lib.terminal_utils import Colors, LogBuffer, get_timestamp
 from lib.fast_monitor import FastMarketMonitor, MonitoredMarket
+
+# Optional wallet import (for balance display)
+try:
+    from lib.wallet import WalletManager
+except ImportError:
+    WalletManager = None
 
 
 @dataclass
@@ -52,6 +60,7 @@ class MonitoringDashboard:
         monitor: FastMarketMonitor,
         config: Optional[DashboardConfig] = None,
         shutdown_check: Optional[Callable[[], bool]] = None,
+        wallet: Optional["WalletManager"] = None,
     ):
         """
         Initialize dashboard.
@@ -60,6 +69,7 @@ class MonitoringDashboard:
             monitor: FastMarketMonitor instance
             config: Dashboard configuration
             shutdown_check: Optional callable that returns True when shutdown requested
+            wallet: Optional WalletManager for balance display
         """
         self.monitor = monitor
         self.config = config or DashboardConfig()
@@ -68,9 +78,56 @@ class MonitoringDashboard:
         self.activity_log = LogBuffer(max_size=self.config.activity_log_size)
         self.start_time = time.time()
 
+        # Wallet for balance display
+        self.wallet = wallet
+        self._last_balance: Optional[float] = None
+        self._balance_fetch_time: float = 0.0
+        self._balance_fetch_interval: float = 10.0  # Refresh balance every 10s
+
+        # Keyboard control state
+        self.exit_reason: Optional[str] = None  # "back", "quit", or None
+        self._input_thread: Optional[threading.Thread] = None
+
     def log_activity(self, msg: str, level: str = "info") -> None:
         """Add message to activity log."""
         self.activity_log.add(msg, level)
+
+    def _keyboard_listener(self) -> None:
+        """Background thread for keyboard input."""
+        while self.running:
+            try:
+                if sys.platform == 'win32':
+                    import msvcrt
+                    if msvcrt.kbhit():
+                        key = msvcrt.getch().decode('utf-8', errors='ignore').lower()
+                        self._handle_key(key)
+                else:
+                    # Unix/Linux/Mac - use select for non-blocking read
+                    import select
+                    if select.select([sys.stdin], [], [], 0.1)[0]:
+                        key = sys.stdin.read(1).lower()
+                        self._handle_key(key)
+                time.sleep(0.05)
+            except Exception:
+                # Ignore errors in keyboard handling
+                pass
+
+    def _handle_key(self, key: str) -> None:
+        """Handle keyboard input."""
+        if key == 'b':
+            self.exit_reason = "back"
+            self.running = False
+            self.log_activity("Returning to market selection...", "info")
+        elif key == 'q':
+            self.exit_reason = "quit"
+            self.running = False
+            self.log_activity("Exiting...", "info")
+        elif key == '+' or key == '=':
+            self.config.auto_threshold = min(0.10, self.config.auto_threshold + 0.005)
+            self.log_activity(f"Threshold increased to {self.config.auto_threshold:.1%}", "info")
+        elif key == '-':
+            self.config.auto_threshold = max(0.005, self.config.auto_threshold - 0.005)
+            self.log_activity(f"Threshold decreased to {self.config.auto_threshold:.1%}", "info")
 
     def _get_profit_color(self, profit_pct: float) -> str:
         """Return color based on profit percentage."""
@@ -116,19 +173,55 @@ class MonitoringDashboard:
             f"{size_str:>6}"
         )
 
+    def _get_cached_balance(self) -> Optional[float]:
+        """Get cached wallet balance, refreshing if stale."""
+        if not self.wallet:
+            return None
+
+        now = time.time()
+        if now - self._balance_fetch_time > self._balance_fetch_interval:
+            try:
+                balance = self.wallet.get_usdc_balance(use_cache=True)
+                self._last_balance = balance.usdc_balance
+                self._balance_fetch_time = now
+            except Exception:
+                pass  # Keep old balance on error
+
+        return self._last_balance
+
     def _build_header(self) -> List[str]:
-        """Build header with mode, threshold, and trade size."""
+        """Build header with mode, threshold, trade size, and wallet balance."""
         mode = "DRY RUN" if self.config.dry_run else "LIVE"
         mode_color = Colors.YELLOW if self.config.dry_run else Colors.RED
 
-        lines = [
-            f"{Colors.BOLD}{'=' * 78}{Colors.RESET}",
+        # Build main header line
+        header_line = (
             f"{Colors.BOLD}  DUTCH BOOK MONITOR{Colors.RESET}  |  "
             f"Mode: {mode_color}{mode}{Colors.RESET}  |  "
             f"Threshold: {Colors.CYAN}{self.config.auto_threshold:.1%}{Colors.RESET}  |  "
-            f"Size: {Colors.CYAN}${self.config.trade_size:.2f}{Colors.RESET}",
+            f"Size: {Colors.CYAN}${self.config.trade_size:.2f}{Colors.RESET}"
+        )
+
+        lines = [
             f"{Colors.BOLD}{'=' * 78}{Colors.RESET}",
+            header_line,
         ]
+
+        # Add wallet balance line if available
+        balance = self._get_cached_balance()
+        if balance is not None:
+            # Get P&L if initial balance was set
+            pnl_str = ""
+            if self.wallet and self.wallet.initial_balance is not None:
+                pnl = balance - self.wallet.initial_balance
+                pnl_color = Colors.GREEN if pnl >= 0 else Colors.RED
+                pnl_str = f"  |  P&L: {pnl_color}${pnl:+.2f}{Colors.RESET}"
+
+            lines.append(
+                f"  Wallet: {Colors.CYAN}${balance:,.2f}{Colors.RESET} USDC{pnl_str}"
+            )
+
+        lines.append(f"{Colors.BOLD}{'=' * 78}{Colors.RESET}")
         return lines
 
     def _build_status_bar(self) -> List[str]:
@@ -266,7 +359,7 @@ class MonitoringDashboard:
             uptime_str = f"{uptime/3600:.1f}h"
 
         lines = [
-            f"  {Colors.DIM}Uptime: {uptime_str} | Press Ctrl+C to stop{Colors.RESET}",
+            f"  {Colors.DIM}[B] Back | [+/-] Threshold | [Q] Quit | Uptime: {uptime_str}{Colors.RESET}",
         ]
         return lines
 
@@ -284,7 +377,12 @@ class MonitoringDashboard:
     async def run(self) -> None:
         """Run the dashboard update loop."""
         self.running = True
+        self.exit_reason = None
         self.start_time = time.time()
+
+        # Start keyboard listener thread
+        self._input_thread = threading.Thread(target=self._keyboard_listener, daemon=True)
+        self._input_thread.start()
 
         try:
             while self.running:
@@ -301,6 +399,11 @@ class MonitoringDashboard:
 
         except asyncio.CancelledError:
             pass
+        finally:
+            # Stop keyboard listener
+            self.running = False
+            if self._input_thread and self._input_thread.is_alive():
+                self._input_thread.join(timeout=0.2)
 
     def stop(self) -> None:
         """Stop the dashboard loop."""

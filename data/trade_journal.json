@@ -1,0 +1,33 @@
+{
+  "trades": {
+    "test-1768851657952-74b29f": {
+      "trade_id": "test-1768851657952-74b29f",
+      "market_slug": "will-bitcoin-hit-1m-before-gta-vi-872",
+      "token_id": "105267568073659068217311993901927962476298440625043565106676088842803600775810",
+      "side": "BUY",
+      "order_id": null,
+      "order_side": "BUY",
+      "order_price": 0.5,
+      "fill_price": 0.0,
+      "size": 1.0,
+      "cost": 0.0,
+      "status": "simulated",
+      "created_at": 1768851657.952915,
+      "filled_at": null,
+      "settled_at": null,
+      "outcome": null,
+      "payout": 0.0,
+      "realized_pnl": 0.0,
+      "linked_trade_id": null,
+      "notes": "DRY RUN - [YES] Will bitcoin hit $1m before GTA VI?"
+    }
+  },
+  "arbitrage_trades": {},
+  "stats": {
+    "total_realized_pnl": 0.0,
+    "total_trades": 1,
+    "winning_trades": 0,
+    "losing_trades": 0
+  },
+  "last_updated": "2026-01-19T14:40:57.954379"
+}

@@ -161,5 +161,70 @@ def main():
     print()
 
 
+async def run_benchmark_async(
+    symbol: str = "BTC",
+    duration: float = 30.0,
+    all_symbols: bool = False,
+    poll_interval: float = 1.0,
+) -> None:
+    """
+    Async entry point for benchmark (called from main.py).
+
+    Args:
+        symbol: Asset symbol to benchmark
+        duration: Duration per oracle in seconds
+        all_symbols: If True, benchmark all supported symbols
+        poll_interval: Poll interval for REST oracles
+    """
+    benchmark = OracleBenchmark()
+
+    print(f"\n{Colors.BOLD}{'='*70}{Colors.RESET}")
+    print(f"{Colors.BOLD}  Oracle Latency Benchmark{Colors.RESET}")
+    print(f"{Colors.BOLD}{'='*70}{Colors.RESET}\n")
+
+    if all_symbols:
+        symbols = ["BTC", "ETH", "SOL", "MATIC", "LINK", "AVAX"]
+        print(f"Symbols: {', '.join(symbols)}")
+        print(f"Duration: {duration}s per oracle\n")
+
+        all_results = await benchmark.run_all_symbols(
+            symbols,
+            duration=duration,
+            poll_interval=poll_interval,
+        )
+        benchmark.print_multi_symbol_report(all_results)
+
+        # Print overall recommendation
+        print(f"\n{Colors.BOLD}Overall Recommendation:{Colors.RESET}")
+        print("-" * 40)
+
+        wins = {}
+        for sym, results in all_results.items():
+            if results:
+                best = results[0].oracle_name
+                wins[best] = wins.get(best, 0) + 1
+
+        if wins:
+            best_oracle = max(wins.items(), key=lambda x: x[1])
+            print(f"{Colors.GREEN}Use {best_oracle[0]} - fastest for {best_oracle[1]}/{len(symbols)} assets{Colors.RESET}")
+    else:
+        print(f"Symbol: {symbol.upper()}")
+        print(f"Duration: {duration}s per oracle\n")
+
+        results = await benchmark.run_all(
+            symbol.upper(),
+            duration=duration,
+            poll_interval=poll_interval,
+        )
+        benchmark.print_report(results)
+
+        if results:
+            best = results[0]
+            print(f"{Colors.GREEN}Recommended: {best.oracle_name}{Colors.RESET}")
+            print(f"  Median latency: {best.p50_latency:.0f}ms")
+
+    print()
+
+
 if __name__ == "__main__":
     main()

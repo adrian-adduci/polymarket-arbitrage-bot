@@ -203,5 +203,9 @@ def main():
         print("\nExiting...")
 
 
+# Alias for backwards compatibility and main.py import
+OrderbookViewer = OrderbookTUI
+
+
 if __name__ == "__main__":
     main()
