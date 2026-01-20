@@ -63,7 +63,9 @@ class UpcomingMarket:
 class CryptoUpdownConfig:
     """Configuration for crypto updown scanner."""
 
-    assets: List[str] = field(default_factory=lambda: ["btc", "eth", "sol"])
+    assets: List[str] = field(default_factory=lambda: [
+        "btc", "eth", "sol", "xrp", "doge", "ada", "avax", "link"
+    ])
     interval_seconds: int = 900  # 15 minutes (for backwards compatibility)
     host: str = "https://gamma-api.polymarket.com"
     timeout: int = 10

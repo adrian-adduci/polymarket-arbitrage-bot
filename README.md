@@ -1,33 +1,6 @@
 # Polymarket Arbitrage Bot
 
-Production-ready Python trading bot for Polymarket with gasless transactions and real-time WebSocket orderbook streaming.
-
-Forked From: https://x.com/vladmeer67 
-
-
-### Configuration
-
-Set environment variables:
-
-```bash
-export POLY_PRIVATE_KEY=your_private_key
-export POLY_PROXY_WALLET=0xYourPolymarketProxyWallet
-```
-
-> **PROXY WALLET**: Find at [polymarket.com/settings](https://polymarket.com/settings)
-
-### Quick Start - Orderbook Viewer
-
-View real-time orderbook data (read-only, no trading):
-
-```bash
-# View ETH market orderbook
-python apps/orderbook_viewer.py --coin ETH
-
-```
-<img width="690" height="476" alt="image (1)" src="https://github.com/user-attachments/assets/83621505-41e7-4b5a-90fd-3c84d1610291" />
-
-**Note:** Orderbook viewer doesn't require credentials - it's a read-only monitoring tool.
+Forked from orginal project: https://x.com/vladmeer67 
 
 ### Quick Start - Flash Crash Strategy
 
@@ -68,6 +41,51 @@ Real-time orderbook visualization:
 
 ```bash
 python apps/orderbook_viewer.py --coin BTC
+```
+
+## Web Dashboard
+
+The bot includes a full-featured web dashboard for monitoring and control.
+
+### Starting the Web GUI
+
+```bash
+# Development mode (with auto-reload)
+uvicorn api.main:app --reload --port 8000
+
+# Production mode
+python -m api.main
+```
+
+Access at: **http://localhost:8000**
+
+### Dashboard Features
+
+| Page | Description |
+|------|-------------|
+| `/` | Main dashboard - start/stop trading, view opportunities, P&L tracking |
+| `/trades` | Trade history with filtering and CSV export |
+| `/settings` | Configure trade size, thresholds, and risk limits |
+| `/research` | Backtesting interface and performance analytics |
+
+### API Endpoints
+
+REST API available at `/api/v1/`:
+- `POST /api/v1/trading/start` - Start trading bot
+- `POST /api/v1/trading/stop` - Stop trading bot
+- `GET /api/v1/trading/status` - Get bot status
+- `GET /api/v1/markets/upcoming` - Browse upcoming crypto markets
+
+WebSocket streams at:
+- `ws://localhost:8000/ws/status` - Real-time bot status
+- `ws://localhost:8000/ws/opportunities` - Live opportunity alerts
+
+### Web GUI Environment Configuration
+
+```bash
+API_HOST=127.0.0.1    # Server host (default: localhost)
+API_PORT=8000         # Server port (default: 8000)
+API_DB_PATH=data/trading_bot.db  # Database location
 ```
 
 ## Usage Examples

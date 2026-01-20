@@ -139,58 +139,58 @@ class TradingLauncher:
     async def _run_interactive(self) -> None:
         """Interactive menu-driven mode."""
         while True:
-            # Main menu
+            # Flattened main menu - all options visible
             choice = await self._show_main_menu()
 
-            if choice == "strategy":
-                strategy = await self._select_strategy()
-                if strategy:
-                    await self._run_strategy_flow(strategy)
+            if choice is None:
+                # User pressed Escape
+                print("\nGoodbye!")
+                break
 
-            elif choice == "tools":
-                tool = await self._select_tool()
-                if tool:
-                    await self._run_tool(tool)
+            elif choice in self.STRATEGIES:
+                # Direct strategy selection
+                await self._run_strategy_flow(choice)
+
+            elif choice in self.TOOLS:
+                # Direct tool selection
+                await self._run_tool(choice)
 
             elif choice == "quit":
                 print("\nGoodbye!")
                 break
 
     async def _show_main_menu(self) -> Optional[str]:
-        """Display main menu."""
-        return await radiolist_dialog(
-            title="Polymarket Trading System",
-            text="Select an option:",
-            values=[
-                ("strategy", "Run Trading Strategy"),
-                ("tools", "Tools & Utilities"),
-                ("quit", "Exit"),
-            ],
-        ).run_async()
-
-    async def _select_strategy(self) -> Optional[str]:
-        """Strategy selection menu."""
-        choices = [
-            (key, f"{value[0]}\n      {value[1]}")
-            for key, value in self.STRATEGIES.items()
+        """Display flattened main menu with all options visible."""
+        # Build menu items with visual separators
+        values = [
+            # Strategies section
+            ("dutch-book", "Dutch Book Arbitrage    | Profit when YES+NO < 1.0"),
+            ("flash-crash", "Flash Crash Trading     | Buy on sudden drops"),
+            ("signals", "Signal-Based Trading    | AI/ML edge detection"),
+            ("test-trade", "Test Trade              | Verify system works"),
+            # Tools section (visual separator via padding)
+            ("---tools", "─" * 52),
+            ("orderbook", "Orderbook Viewer        | Real-time display"),
+            ("benchmark", "Oracle Benchmark        | Measure latency"),
+            ("balance", "Wallet Balance          | Check USDC & P&L"),
+            # Exit
+            ("---exit", "─" * 52),
+            ("quit", "Exit"),
         ]
-        return await radiolist_dialog(
-            title="Select Strategy",
-            text="Choose a trading strategy:",
-            values=choices,
-        ).run_async()
 
-    async def _select_tool(self) -> Optional[str]:
-        """Tool selection menu."""
-        choices = [
-            (key, f"{value[0]}\n      {value[1]}")
-            for key, value in self.TOOLS.items()
-        ]
-        return await radiolist_dialog(
-            title="Select Tool",
-            text="Choose a tool:",
-            values=choices,
-        ).run_async()
+        while True:
+            choice = await radiolist_dialog(
+                title="Polymarket Arbitrage Bot",
+                text="Use arrow keys to navigate, Enter to select:",
+                values=values,
+            ).run_async()
+
+            # Skip separator lines (re-prompt if selected)
+            if choice and not choice.startswith("---"):
+                return choice
+            # If user cancels (Escape), return None
+            if choice is None:
+                return None
 
     async def _run_strategy_flow(self, strategy: str) -> None:
         """Run the full strategy flow: select markets, configure, execute."""

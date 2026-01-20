@@ -45,6 +45,7 @@ from prompt_toolkit.layout import Layout, HSplit, VSplit, Window, FormattedTextC
 from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.styles import Style
 from prompt_toolkit.formatted_text import FormattedText
+from prompt_toolkit.shortcuts import checkboxlist_dialog, input_dialog
 
 from lib.market_scanner import MarketScanner, BinaryMarket
 from lib.crypto_updown_scanner import CryptoUpdownScanner
@@ -140,14 +141,15 @@ class InteractiveMarketSelector:
         include_crypto_updown: bool = True,
     ) -> None:
         """
-        Fetch available markets from Gamma API.
+        Fetch available markets from Gamma API (non-blocking).
 
         Args:
             min_liquidity: Minimum liquidity filter
             include_crypto_updown: Include crypto 15m up/down markets (fetched via separate API)
         """
-        # Fetch general binary markets
-        general_markets = self.scanner.get_active_binary_markets(
+        # Run blocking HTTP calls in thread pool to avoid freezing event loop
+        general_markets = await asyncio.to_thread(
+            self.scanner.get_active_binary_markets,
             min_liquidity=min_liquidity
         )
 
@@ -155,7 +157,9 @@ class InteractiveMarketSelector:
         crypto_markets = []
         if include_crypto_updown:
             updown_scanner = CryptoUpdownScanner()
-            crypto_markets = updown_scanner.get_active_updown_markets()
+            crypto_markets = await asyncio.to_thread(
+                updown_scanner.get_active_updown_markets
+            )
 
         # Combine markets (crypto updown first for visibility)
         self.state.markets = crypto_markets + general_markets
@@ -405,7 +409,10 @@ class InteractiveMarketSelector:
 
     async def run(self) -> Optional[List[BinaryMarket]]:
         """
-        Run interactive selection, return selected markets.
+        Run interactive selection with optional search filter.
+
+        Uses checkboxlist_dialog instead of full-screen Application
+        for better Windows compatibility with asyncio.
 
         Returns:
             List of selected markets, or None if cancelled
@@ -414,20 +421,56 @@ class InteractiveMarketSelector:
             print("No markets available. Call fetch_markets() first.")
             return None
 
-        self._app = Application(
-            layout=self._create_layout(),
-            key_bindings=self._create_keybindings(),
-            style=self._create_style(),
-            full_screen=True,
-            mouse_support=True,
-        )
+        # Optional search filter
+        search_query = await input_dialog(
+            title="Market Search (Optional)",
+            text="Enter search term to filter markets (or leave blank for all):",
+        ).run_async()
 
-        result = await self._app.run_async()
-        return result
+        # Apply filter to markets
+        filtered = self.state.filtered_markets
+        if search_query and search_query.strip():
+            query = search_query.lower().strip()
+            filtered = [m for m in filtered if query in m.question.lower() or query in m.slug.lower()]
+
+        if not filtered:
+            if search_query:
+                print(f"No markets match '{search_query}'")
+            else:
+                print("No markets available.")
+            return None
+
+        # Build choices list: (market_index, display_string)
+        choices = []
+        for i, market in enumerate(filtered[:50]):  # Limit to 50 for performance
+            liquidity = format_liquidity(market.liquidity)
+            # Truncate long questions
+            question = market.question[:45] + "..." if len(market.question) > 45 else market.question
+            label = f"{question:<48} | {liquidity:>8}"
+            choices.append((i, label))
+
+        print(f"Showing {len(choices)} of {len(filtered)} markets")
+
+        # Use checkboxlist_dialog (handles async correctly on Windows)
+        result = await checkboxlist_dialog(
+            title="Select Markets",
+            text=f"Use UP/DOWN to navigate, SPACE to toggle, ENTER to confirm (max {MAX_SELECTIONS}):",
+            values=choices,
+        ).run_async()
+
+        if not result:
+            return None
+
+        # Convert indices back to markets (limit to MAX_SELECTIONS)
+        selected = [filtered[idx] for idx in result[:MAX_SELECTIONS] if idx < len(filtered)]
+        return selected if selected else None
 
     def run_sync(self) -> Optional[List[BinaryMarket]]:
         """
-        Run interactive selection synchronously.
+        Run interactive selection synchronously with optional search filter.
+
+        Uses checkboxlist_dialog instead of full-screen Application
+        for better Windows compatibility.
 
         Returns:
             List of selected markets, or None if cancelled
@@ -436,15 +479,49 @@ class InteractiveMarketSelector:
             print("No markets available. Call fetch_markets() first.")
             return None
 
-        self._app = Application(
-            layout=self._create_layout(),
-            key_bindings=self._create_keybindings(),
-            style=self._create_style(),
-            full_screen=True,
-            mouse_support=True,
-        )
+        # Optional search filter
+        search_query = input_dialog(
+            title="Market Search (Optional)",
+            text="Enter search term to filter markets (or leave blank for all):",
+        ).run()
 
-        return self._app.run()
+        # Apply filter to markets
+        filtered = self.state.filtered_markets
+        if search_query and search_query.strip():
+            query = search_query.lower().strip()
+            filtered = [m for m in filtered if query in m.question.lower() or query in m.slug.lower()]
+
+        if not filtered:
+            if search_query:
+                print(f"No markets match '{search_query}'")
+            else:
+                print("No markets available.")
+            return None
+
+        # Build choices list: (market_index, display_string)
+        choices = []
+        for i, market in enumerate(filtered[:50]):  # Limit to 50 for performance
+            liquidity = format_liquidity(market.liquidity)
+            # Truncate long questions
+            question = market.question[:45] + "..." if len(market.question) > 45 else market.question
+            label = f"{question:<48} | {liquidity:>8}"
+            choices.append((i, label))
+
+        print(f"Showing {len(choices)} of {len(filtered)} markets")
+
+        # Use checkboxlist_dialog (handles sync correctly on Windows)
+        result = checkboxlist_dialog(
+            title="Select Markets",
+            text=f"Use UP/DOWN to navigate, SPACE to toggle, ENTER to confirm (max {MAX_SELECTIONS}):",
+            values=choices,
+        ).run()
+
+        if not result:
+            return None
+
+        # Convert indices back to markets (limit to MAX_SELECTIONS)
+        selected = [filtered[idx] for idx in result[:MAX_SELECTIONS] if idx < len(filtered)]
+        return selected if selected else None
 
 
 def format_liquidity(liquidity: float) -> str:
