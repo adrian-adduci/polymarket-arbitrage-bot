@@ -1,0 +1,206 @@
+/* Polymarket Arbitrage Bot - Custom Styles */
+
+/* These styles supplement TailwindCSS which is loaded from CDN */
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+}
+
+::-webkit-scrollbar-track {
+    background: #f1f1f1;
+    border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb {
+    background: #c1c1c1;
+    border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: #a1a1a1;
+}
+
+/* Loading animations */
+@keyframes pulse-opacity {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
+}
+
+.animate-pulse-opacity {
+    animation: pulse-opacity 2s ease-in-out infinite;
+}
+
+/* Number formatting */
+.font-tabular {
+    font-variant-numeric: tabular-nums;
+}
+
+/* Profit/Loss colors */
+.profit-positive {
+    color: #22c55e;
+}
+
+.profit-negative {
+    color: #ef4444;
+}
+
+/* Status indicator */
+.status-indicator {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+}
+
+.status-dot.active {
+    background-color: #22c55e;
+    box-shadow: 0 0 0 2px rgba(34, 197, 94, 0.2);
+}
+
+.status-dot.inactive {
+    background-color: #9ca3af;
+}
+
+.status-dot.error {
+    background-color: #ef4444;
+    box-shadow: 0 0 0 2px rgba(239, 68, 68, 0.2);
+}
+
+/* Toast notifications */
+.toast {
+    position: fixed;
+    bottom: 1rem;
+    right: 1rem;
+    padding: 0.75rem 1rem;
+    border-radius: 0.5rem;
+    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+    z-index: 1000;
+    animation: slide-in 0.3s ease-out;
+}
+
+.toast.success {
+    background-color: #22c55e;
+    color: white;
+}
+
+.toast.error {
+    background-color: #ef4444;
+    color: white;
+}
+
+.toast.info {
+    background-color: #3b82f6;
+    color: white;
+}
+
+@keyframes slide-in {
+    from {
+        transform: translateX(100%);
+        opacity: 0;
+    }
+    to {
+        transform: translateX(0);
+        opacity: 1;
+    }
+}
+
+/* Table hover effects */
+.data-table tbody tr {
+    transition: background-color 0.15s ease;
+}
+
+/* Card hover effects */
+.card-interactive {
+    transition: box-shadow 0.2s ease, transform 0.2s ease;
+}
+
+.card-interactive:hover {
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+    transform: translateY(-1px);
+}
+
+/* Button focus states */
+button:focus-visible {
+    outline: 2px solid #3b82f6;
+    outline-offset: 2px;
+}
+
+/* Modal backdrop blur */
+.modal-backdrop {
+    backdrop-filter: blur(4px);
+}
+
+/* Responsive adjustments */
+@media (max-width: 768px) {
+    .card-body {
+        padding: 1rem;
+    }
+
+    .data-table th,
+    .data-table td {
+        padding: 0.5rem;
+        font-size: 0.875rem;
+    }
+}
+
+/* Print styles */
+@media print {
+    .no-print {
+        display: none !important;
+    }
+
+    body {
+        background: white;
+    }
+
+    .card {
+        box-shadow: none;
+        border: 1px solid #e5e7eb;
+    }
+}
+
+/* Upcoming Markets Styles */
+.countdown {
+    font-variant-numeric: tabular-nums;
+    transition: color 0.3s ease;
+}
+
+.countdown.text-yellow-600 {
+    animation: pulse-countdown 1s ease-in-out infinite;
+}
+
+@keyframes pulse-countdown {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.6; }
+}
+
+/* Duration tabs */
+.duration-tab {
+    transition: all 0.2s ease;
+}
+
+.duration-tab:hover {
+    transform: translateY(-1px);
+}
+
+/* Asset indicator dots */
+.asset-dot-btc { background-color: #f7931a; }
+.asset-dot-eth { background-color: #627eea; }
+.asset-dot-sol { background-color: #9945ff; }
+
+/* Opening soon indicator */
+@keyframes glow-yellow {
+    0%, 100% { box-shadow: 0 0 5px rgba(234, 179, 8, 0.3); }
+    50% { box-shadow: 0 0 15px rgba(234, 179, 8, 0.5); }
+}
+
+.opening-soon {
+    animation: glow-yellow 2s ease-in-out infinite;
+}

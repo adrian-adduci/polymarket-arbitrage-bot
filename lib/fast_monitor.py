@@ -179,7 +179,8 @@ class FastMarketMonitor:
         self._running = False
         self._ws_task: Optional[asyncio.Task] = None
         self._last_opportunity_time: Dict[str, float] = {}  # Debounce opportunities
-        self._opportunity_debounce_ms = 500  # Min time between opportunities for same market
+        self._opportunity_debounce_ms = 50  # Min time between opportunities for same market (50ms for HFT)
+        self._max_staleness_ms = 500  # Reject opportunities if either orderbook is older than this
 
     @property
     def is_running(self) -> bool:
@@ -248,6 +249,17 @@ class FastMarketMonitor:
     async def _check_opportunity(self, monitored: MonitoredMarket) -> None:
         """Check for arbitrage opportunity and notify if found."""
         market = monitored.market
+
+        # Staleness check - reject if either orderbook is too old
+        if monitored.yes_book and monitored.no_book:
+            yes_age = (time.time() - monitored.yes_book.timestamp / 1000) * 1000 if monitored.yes_book.timestamp > 0 else monitored.age_ms
+            no_age = (time.time() - monitored.no_book.timestamp / 1000) * 1000 if monitored.no_book.timestamp > 0 else monitored.age_ms
+
+            # Use the market's age_ms as fallback (time since last update)
+            max_age = max(yes_age, no_age, monitored.age_ms)
+            if max_age > self._max_staleness_ms:
+                logger.debug(f"Skipping stale market {market.slug}: age={max_age:.0f}ms")
+                return
 
         # Debounce opportunities for same market
         last_time = self._last_opportunity_time.get(market.slug, 0)

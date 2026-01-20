@@ -64,6 +64,15 @@ from .signer import OrderSigner, Order
 from .client import ClobClient, RelayerClient, ApiCredentials
 from .crypto import KeyManager, CryptoError, InvalidPasswordError
 
+# Optional async client for high-performance mode
+try:
+    from .async_client import AsyncClobClient, AsyncRelayerClient
+    ASYNC_CLIENT_AVAILABLE = True
+except ImportError:
+    ASYNC_CLIENT_AVAILABLE = False
+    AsyncClobClient = None
+    AsyncRelayerClient = None
+
 
 # Configure logging
 logging.basicConfig(
@@ -148,7 +157,8 @@ class TradingBot:
         encrypted_key_path: Optional[str] = None,
         password: Optional[str] = None,
         api_creds_path: Optional[str] = None,
-        log_level: int = logging.INFO
+        log_level: int = logging.INFO,
+        use_async_client: bool = True
     ):
         """
         Initialize trading bot.
@@ -185,6 +195,7 @@ class TradingBot:
             password: Password for encrypted key
             api_creds_path: Path to API credentials file
             log_level: Logging level
+            use_async_client: Use native async HTTP client for lower latency (default True)
         """
         # Set log level
         logger.setLevel(log_level)
@@ -210,6 +221,11 @@ class TradingBot:
         self.relayer_client: Optional[RelayerClient] = None
         self._api_creds: Optional[ApiCredentials] = None
 
+        # Async client for high-performance mode
+        self._use_async_client = use_async_client and ASYNC_CLIENT_AVAILABLE
+        self._async_clob_client: Optional["AsyncClobClient"] = None
+        self._async_relayer_client: Optional["AsyncRelayerClient"] = None
+
         # Load private key
         if private_key:
             self.signer = OrderSigner(private_key)
@@ -227,7 +243,7 @@ class TradingBot:
         if self.signer and not self._api_creds:
             self._derive_api_creds()
 
-        logger.info(f"TradingBot initialized (gasless: {self.config.use_gasless})")
+        logger.info(f"TradingBot initialized (gasless: {self.config.use_gasless}, async: {self._use_async_client})")
 
     def _load_encrypted_key(self, filepath: str, password: str) -> None:
         """Load and decrypt private key from encrypted file."""
@@ -261,6 +277,11 @@ class TradingBot:
             logger.info("Deriving L2 API credentials...")
             self._api_creds = self.clob_client.create_or_derive_api_key(self.signer)
             self.clob_client.set_api_creds(self._api_creds)
+
+            # Also set on async client if available
+            if self._async_clob_client:
+                self._async_clob_client.set_api_creds(self._api_creds)
+
             logger.info("L2 API credentials derived successfully")
         except Exception as e:
             logger.warning(f"Failed to derive API credentials: {e}")
@@ -268,7 +289,7 @@ class TradingBot:
 
     def _init_clients(self) -> None:
         """Initialize API clients."""
-        # CLOB client
+        # CLOB client (synchronous, for backwards compatibility)
         self.clob_client = ClobClient(
             host=self.config.clob.host,
             chain_id=self.config.clob.chain_id,
@@ -287,6 +308,26 @@ class TradingBot:
                 tx_type=self.config.relayer.tx_type,
             )
             logger.info("Relayer client initialized (gasless enabled)")
+
+        # Initialize async clients for high-performance mode
+        if self._use_async_client:
+            self._async_clob_client = AsyncClobClient(
+                host=self.config.clob.host,
+                chain_id=self.config.clob.chain_id,
+                signature_type=self.config.clob.signature_type,
+                funder=self.config.safe_address,
+                api_creds=self._api_creds,
+                builder_creds=self.config.builder if self.config.use_gasless else None,
+            )
+
+            if self.config.use_gasless:
+                self._async_relayer_client = AsyncRelayerClient(
+                    host=self.config.relayer.host,
+                    chain_id=self.config.clob.chain_id,
+                    builder_creds=self.config.builder,
+                    tx_type=self.config.relayer.tx_type,
+                )
+            logger.info("Async clients initialized (high-performance mode)")
 
     async def _run_in_thread(self, func: Callable[..., T], *args: Any, **kwargs: Any) -> T:
         """Run a blocking call in a worker thread to avoid event loop stalls."""
@@ -347,12 +388,15 @@ class TradingBot:
             # Sign order
             signed = signer.sign_order(order)
 
-            # Submit to CLOB
-            response = await self._run_in_thread(
-                self.clob_client.post_order,
-                signed,
-                order_type,
-            )
+            # Submit to CLOB (use async client if available for lower latency)
+            if self._async_clob_client:
+                response = await self._async_clob_client.post_order(signed, order_type)
+            else:
+                response = await self._run_in_thread(
+                    self.clob_client.post_order,
+                    signed,
+                    order_type,
+                )
 
             logger.info(
                 f"Order placed: {side} {size}@{price} "
@@ -387,21 +431,32 @@ class TradingBot:
         Returns:
             List of OrderResults
         """
-        results = []
-        for order_data in orders:
-            result = await self.place_order(
+        # Execute all orders in parallel for minimal latency
+        # Rate limiting is handled by the API, no artificial delay needed
+        tasks = [
+            self.place_order(
                 token_id=order_data["token_id"],
                 price=order_data["price"],
                 size=order_data["size"],
                 side=order_data["side"],
                 order_type=order_type,
             )
-            results.append(result)
+            for order_data in orders
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
 
-            # Small delay between orders to avoid rate limits
-            await asyncio.sleep(0.1)
+        # Convert exceptions to failed OrderResults
+        processed_results = []
+        for result in results:
+            if isinstance(result, Exception):
+                processed_results.append(OrderResult(
+                    success=False,
+                    message=str(result)
+                ))
+            else:
+                processed_results.append(result)
 
-        return results
+        return processed_results
 
     async def cancel_order(self, order_id: str) -> OrderResult:
         """
@@ -414,7 +469,10 @@ class TradingBot:
             OrderResult with cancellation status
         """
         try:
-            response = await self._run_in_thread(self.clob_client.cancel_order, order_id)
+            if self._async_clob_client:
+                response = await self._async_clob_client.cancel_order(order_id)
+            else:
+                response = await self._run_in_thread(self.clob_client.cancel_order, order_id)
             logger.info(f"Order cancelled: {order_id}")
             return OrderResult(
                 success=True,
@@ -438,7 +496,10 @@ class TradingBot:
             OrderResult with cancellation status
         """
         try:
-            response = await self._run_in_thread(self.clob_client.cancel_all_orders)
+            if self._async_clob_client:
+                response = await self._async_clob_client.cancel_all_orders()
+            else:
+                response = await self._run_in_thread(self.clob_client.cancel_all_orders)
             logger.info("All orders cancelled")
             return OrderResult(
                 success=True,
@@ -465,11 +526,14 @@ class TradingBot:
             OrderResult with cancellation status
         """
         try:
-            response = await self._run_in_thread(
-                self.clob_client.cancel_market_orders,
-                market,
-                asset_id,
-            )
+            if self._async_clob_client:
+                response = await self._async_clob_client.cancel_market_orders(market, asset_id)
+            else:
+                response = await self._run_in_thread(
+                    self.clob_client.cancel_market_orders,
+                    market,
+                    asset_id,
+                )
             logger.info(f"Market orders cancelled (market: {market or 'all'}, asset: {asset_id or 'all'})")
             return OrderResult(
                 success=True,
@@ -488,7 +552,10 @@ class TradingBot:
             List of open orders
         """
         try:
-            orders = await self._run_in_thread(self.clob_client.get_open_orders)
+            if self._async_clob_client:
+                orders = await self._async_clob_client.get_open_orders()
+            else:
+                orders = await self._run_in_thread(self.clob_client.get_open_orders)
             logger.debug(f"Retrieved {len(orders)} open orders")
             return orders
         except Exception as e:
@@ -506,7 +573,10 @@ class TradingBot:
             Order details or None
         """
         try:
-            return await self._run_in_thread(self.clob_client.get_order, order_id)
+            if self._async_clob_client:
+                return await self._async_clob_client.get_order(order_id)
+            else:
+                return await self._run_in_thread(self.clob_client.get_order, order_id)
         except Exception as e:
             logger.error(f"Failed to get order {order_id}: {e}")
             return None
@@ -527,7 +597,10 @@ class TradingBot:
             List of trades
         """
         try:
-            trades = await self._run_in_thread(self.clob_client.get_trades, token_id, limit)
+            if self._async_clob_client:
+                trades = await self._async_clob_client.get_trades(token_id, limit)
+            else:
+                trades = await self._run_in_thread(self.clob_client.get_trades, token_id, limit)
             logger.debug(f"Retrieved {len(trades)} trades")
             return trades
         except Exception as e:
@@ -545,7 +618,10 @@ class TradingBot:
             Order book data
         """
         try:
-            return await self._run_in_thread(self.clob_client.get_order_book, token_id)
+            if self._async_clob_client:
+                return await self._async_clob_client.get_order_book(token_id)
+            else:
+                return await self._run_in_thread(self.clob_client.get_order_book, token_id)
         except Exception as e:
             logger.error(f"Failed to get order book: {e}")
             return {}
@@ -561,7 +637,10 @@ class TradingBot:
             Price data
         """
         try:
-            return await self._run_in_thread(self.clob_client.get_market_price, token_id)
+            if self._async_clob_client:
+                return await self._async_clob_client.get_market_price(token_id)
+            else:
+                return await self._run_in_thread(self.clob_client.get_market_price, token_id)
         except Exception as e:
             logger.error(f"Failed to get market price: {e}")
             return {}
@@ -613,6 +692,102 @@ class TradingBot:
             "size": size,
             "side": side.upper(),
         }
+
+    def sign_order(
+        self,
+        token_id: str,
+        price: float,
+        size: float,
+        side: str,
+        fee_rate_bps: int = 0
+    ) -> Dict[str, Any]:
+        """
+        Create and sign an order without submitting it.
+
+        Use this for atomic execution where you want to sign multiple
+        orders before submitting them in parallel.
+
+        Args:
+            token_id: Market token ID
+            price: Price per share (0-1)
+            size: Number of shares
+            side: 'BUY' or 'SELL'
+            fee_rate_bps: Fee rate in basis points
+
+        Returns:
+            Signed order dictionary ready for submission
+        """
+        signer = self.require_signer()
+
+        order = Order(
+            token_id=token_id,
+            price=price,
+            size=size,
+            side=side,
+            maker=self.config.safe_address,
+            fee_rate_bps=fee_rate_bps,
+        )
+
+        return signer.sign_order(order)
+
+    async def submit_signed_order(
+        self,
+        signed_order: Dict[str, Any],
+        order_type: str = "GTC"
+    ) -> OrderResult:
+        """
+        Submit a pre-signed order to the CLOB.
+
+        Use this for atomic execution after signing orders with sign_order().
+
+        Args:
+            signed_order: Order signed with sign_order()
+            order_type: Order type (GTC, GTD, FOK)
+
+        Returns:
+            OrderResult with order status
+        """
+        try:
+            # Submit to CLOB (use async client if available for lower latency)
+            if self._async_clob_client:
+                response = await self._async_clob_client.post_order(signed_order, order_type)
+            else:
+                response = await self._run_in_thread(
+                    self.clob_client.post_order,
+                    signed_order,
+                    order_type,
+                )
+
+            return OrderResult.from_response(response)
+
+        except Exception as e:
+            logger.error(f"Failed to submit signed order: {e}")
+            return OrderResult(
+                success=False,
+                message=str(e)
+            )
+
+    async def close(self) -> None:
+        """
+        Close async client sessions.
+
+        Should be called when done using the bot to clean up resources.
+        """
+        if self._async_clob_client:
+            await self._async_clob_client.close()
+            self._async_clob_client = None
+        if self._async_relayer_client:
+            await self._async_relayer_client.close()
+            self._async_relayer_client = None
+        logger.debug("Async client sessions closed")
+
+    async def __aenter__(self):
+        """Async context manager entry."""
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Async context manager exit."""
+        await self.close()
 
 
 # Convenience function for quick initialization

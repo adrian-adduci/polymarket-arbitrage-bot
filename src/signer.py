@@ -43,6 +43,7 @@ Security Note:
 """
 
 import time
+import uuid
 from typing import Optional, Dict, Any
 from dataclasses import dataclass
 from eth_account import Account
@@ -91,7 +92,9 @@ class Order:
             raise ValueError(f"Invalid size: {self.size}")
 
         if self.nonce is None:
-            self.nonce = int(time.time())
+            # Use nanosecond timestamp + random bytes to prevent collision
+            # time_ns provides nanosecond precision, uuid4 adds randomness
+            self.nonce = int(time.time_ns()) ^ (uuid.uuid4().int >> 64)
 
         # Convert to integers for blockchain
         self.maker_amount = str(int(self.size * self.price * 10**USDC_DECIMALS))

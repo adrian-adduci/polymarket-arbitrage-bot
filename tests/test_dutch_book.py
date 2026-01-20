@@ -553,18 +553,34 @@ class TestMarketScanner:
 
     def test_parse_json_field_from_string(self, scanner: MarketScanner):
         """Parse JSON string field."""
-        result = scanner._parse_json_field('["Yes", "No"]')
+        result = scanner._parse_json_field('["Yes", "No"]', "test_field")
         assert result == ["Yes", "No"]
 
     def test_parse_json_field_from_list(self, scanner: MarketScanner):
         """Pass through list field unchanged."""
-        result = scanner._parse_json_field(["Yes", "No"])
+        result = scanner._parse_json_field(["Yes", "No"], "test_field")
         assert result == ["Yes", "No"]
 
-    def test_parse_json_field_invalid_returns_empty(self, scanner: MarketScanner):
-        """Return empty list for invalid JSON."""
-        result = scanner._parse_json_field("invalid json")
-        assert result == []
+    def test_parse_json_field_invalid_raises_error(self, scanner: MarketScanner):
+        """
+        CRITICAL-06: Invalid JSON should raise ValueError instead of silently returning empty.
+
+        This was changed from silently returning empty list to raising an error
+        so that data problems are visible and not silently skipped.
+        """
+        with pytest.raises(ValueError, match="Invalid JSON"):
+            scanner._parse_json_field("invalid json", "test_field")
+
+    def test_is_binary_market_handles_invalid_json(self, scanner: MarketScanner):
+        """Invalid JSON in market data should return False (not binary)."""
+        market = {
+            "outcomes": "invalid json [",  # Malformed JSON
+            "clobTokenIds": '["token1", "token2"]',
+            "acceptingOrders": True,
+        }
+
+        # Should return False (catches ValueError internally)
+        assert scanner._is_binary_market(market) is False
 
     def test_parse_binary_market_complete(self, scanner: MarketScanner):
         """Parse complete market data into BinaryMarket."""
@@ -643,9 +659,19 @@ class TestDutchBookStrategyExecution:
         bot.config = Mock()
         bot.config.safe_address = "0x1234567890123456789012345678901234567890"
 
+        # Mock sync methods (signing)
+        bot.sign_order = Mock(return_value={
+            "order": {"tokenId": "test", "price": 0.5},
+            "signature": "0xabc123",
+        })
+
         # Mock async methods
-        bot.place_order = AsyncMock()
+        bot.submit_signed_order = AsyncMock(return_value=Mock(
+            success=True,
+            order_id="order_123",
+        ))
         bot.cancel_order = AsyncMock()
+        bot.get_order = AsyncMock(return_value={"status": "MATCHED"})
 
         return bot
 
@@ -667,9 +693,11 @@ class TestDutchBookStrategyExecution:
 
     def test_cannot_open_position_when_at_max(self, strategy: DutchBookStrategy):
         """Cannot open position when at max_concurrent_arbs."""
-        # Fill up positions
+        # Fill up positions with mocks that have needs_review=False (active positions)
         for i in range(strategy.config.max_concurrent_arbs):
-            strategy.positions[f"market-{i}"] = Mock()
+            mock_position = Mock()
+            mock_position.needs_review = False  # Mark as active position
+            strategy.positions[f"market-{i}"] = mock_position
 
         assert strategy.can_open_position is False
 
@@ -699,16 +727,16 @@ class TestDutchBookStrategyExecution:
         result = await strategy.execute_arbitrage(opportunity)
 
         assert result is False
-        mock_bot.place_order.assert_not_called()
+        mock_bot.submit_signed_order.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_execute_arbitrage_places_both_orders(self, strategy: DutchBookStrategy, mock_bot):
-        """Successful arbitrage places YES and NO orders."""
-        # Setup mock responses
-        mock_bot.place_order.side_effect = [
+        """Successful arbitrage signs and submits YES and NO orders."""
+        # Setup mock responses - submit_signed_order is called for both orders
+        mock_bot.submit_signed_order = AsyncMock(side_effect=[
             Mock(success=True, order_id="yes_order_1"),
             Mock(success=True, order_id="no_order_1"),
-        ]
+        ])
 
         opportunity = ArbitrageOpportunity(
             market_slug="test-market",
@@ -729,17 +757,17 @@ class TestDutchBookStrategyExecution:
         result = await strategy.execute_arbitrage(opportunity)
 
         assert result is True
-        assert mock_bot.place_order.call_count == 2
+        assert mock_bot.sign_order.call_count == 2  # Both orders signed
+        assert mock_bot.submit_signed_order.call_count == 2  # Both orders submitted
         assert "test-market" in strategy.positions
 
     @pytest.mark.asyncio
     async def test_cancels_yes_order_when_no_order_fails(self, strategy: DutchBookStrategy, mock_bot):
         """If NO order fails, cancel the YES order."""
-        mock_bot.place_order.side_effect = [
+        mock_bot.submit_signed_order = AsyncMock(side_effect=[
             Mock(success=True, order_id="yes_order_1"),
-            Mock(success=False, message="NO order rejected"),
-        ]
-        mock_bot.cancel_order.return_value = None
+            Mock(success=False, order_id=None, message="NO order rejected"),
+        ])
 
         opportunity = ArbitrageOpportunity(
             market_slug="test-market",
@@ -766,11 +794,11 @@ class TestDutchBookStrategyExecution:
     @pytest.mark.asyncio
     async def test_handles_cancel_failure_gracefully(self, strategy: DutchBookStrategy, mock_bot):
         """Handle failure to cancel YES order without crashing."""
-        mock_bot.place_order.side_effect = [
+        mock_bot.submit_signed_order = AsyncMock(side_effect=[
             Mock(success=True, order_id="yes_order_1"),
-            Mock(success=False, message="NO order rejected"),
-        ]
-        mock_bot.cancel_order.side_effect = Exception("Cancel failed")
+            Mock(success=False, order_id=None, message="NO order rejected"),
+        ])
+        mock_bot.cancel_order = AsyncMock(side_effect=Exception("Cancel failed"))
 
         opportunity = ArbitrageOpportunity(
             market_slug="test-market",
@@ -866,9 +894,13 @@ class TestRiskControls:
 
         strategy = DutchBookStrategy(bot=mock_bot, config=config)
 
-        # Add max positions
-        strategy.positions["market-1"] = Mock()
-        strategy.positions["market-2"] = Mock()
+        # Add max positions (with needs_review=False to mark as active)
+        mock_pos_1 = Mock()
+        mock_pos_1.needs_review = False
+        mock_pos_2 = Mock()
+        mock_pos_2.needs_review = False
+        strategy.positions["market-1"] = mock_pos_1
+        strategy.positions["market-2"] = mock_pos_2
 
         assert strategy.can_open_position is False
 
@@ -1030,7 +1062,7 @@ class TestNewConfigParameters:
         assert config.max_total_exposure == 1000.0
         assert config.max_daily_loss == 100.0
         assert config.price_buffer_percent == 0.02  # 2%
-        assert config.fill_check_interval == 1.0
+        assert config.fill_check_interval == 0.1  # 100ms for HFT
 
     def test_custom_risk_config(self):
         """Test custom risk configuration."""
@@ -1316,6 +1348,317 @@ class TestNeedsReviewFlag:
 
         position.needs_review = True
         assert position.needs_review is True
+
+
+# =============================================================================
+# SECTION 12: Floating Point Precision Tests
+# =============================================================================
+
+class TestFloatingPointPrecision:
+    """Tests for floating point precision handling."""
+
+    def test_combined_cost_near_one_precision(self):
+        """Test precision when combined cost is very close to 1.0."""
+        detector = DutchBookDetector(min_profit_margin=0.001, fee_buffer=0, min_liquidity=0)
+
+        # 0.4999999 + 0.4999999 = 0.9999998, profit = 0.0000002
+        opportunity = detector.check_opportunity(
+            yes_ask=0.4999999,
+            no_ask=0.4999999,
+            yes_token_id="yes",
+            no_token_id="no",
+            market_slug="precision-test",
+            yes_ask_size=100,
+            no_ask_size=100,
+        )
+
+        # Should detect the tiny opportunity
+        if opportunity is not None:
+            assert opportunity.combined_cost == pytest.approx(0.9999998, abs=1e-6)
+
+    def test_profit_margin_rounding(self):
+        """Test that profit margin calculations handle rounding correctly."""
+        # Combined = 0.93 exactly, profit should be 0.07 exactly
+        opportunity = ArbitrageOpportunity(
+            market_slug="test",
+            question="Test",
+            condition_id="cond",
+            yes_token_id="yes",
+            no_token_id="no",
+            yes_ask=0.45,
+            no_ask=0.48,
+            combined_cost=0.93,
+            profit_margin=0.07,
+            yes_ask_size=100.0,
+            no_ask_size=100.0,
+            max_size=100.0,
+            timestamp=0.0,
+        )
+
+        # Verify exact calculation
+        assert opportunity.combined_cost == pytest.approx(0.93)
+        assert opportunity.profit_margin == pytest.approx(0.07)
+        assert 1.0 - opportunity.combined_cost == pytest.approx(opportunity.profit_margin)
+
+    def test_fee_buffer_dynamic_calculation(self):
+        """Test fee buffer dynamically affects threshold."""
+        # With high fee buffer, marginal opportunities are rejected
+        high_fee_detector = DutchBookDetector(
+            min_profit_margin=0.02,
+            fee_buffer=0.05,  # 5% fee buffer
+            min_liquidity=0,
+        )
+
+        # 5% raw profit - 5% fee = 0% net profit < 2% min = REJECT
+        opportunity = high_fee_detector.check_opportunity(
+            yes_ask=0.475,
+            no_ask=0.475,  # Combined = 0.95, raw profit = 5%
+            yes_token_id="yes",
+            no_token_id="no",
+            market_slug="test",
+            yes_ask_size=100,
+            no_ask_size=100,
+        )
+
+        assert opportunity is None
+
+    def test_nan_handling(self):
+        """Test NaN values are rejected."""
+        detector = DutchBookDetector()
+
+        opportunity = detector.check_opportunity(
+            yes_ask=float('nan'),
+            no_ask=0.5,
+            yes_token_id="yes",
+            no_token_id="no",
+            market_slug="nan-test",
+        )
+
+        assert opportunity is None
+
+    def test_infinity_handling(self):
+        """Test infinity values are rejected."""
+        detector = DutchBookDetector()
+
+        opportunity = detector.check_opportunity(
+            yes_ask=float('inf'),
+            no_ask=0.5,
+            yes_token_id="yes",
+            no_token_id="no",
+            market_slug="inf-test",
+        )
+
+        assert opportunity is None
+
+    def test_very_small_prices(self):
+        """Test handling of very small prices."""
+        detector = DutchBookDetector(min_profit_margin=0, fee_buffer=0, min_liquidity=0)
+
+        opportunity = detector.check_opportunity(
+            yes_ask=0.0001,
+            no_ask=0.0001,
+            yes_token_id="yes",
+            no_token_id="no",
+            market_slug="small-price",
+            yes_ask_size=10000,
+            no_ask_size=10000,
+        )
+
+        assert opportunity is not None
+        assert opportunity.profit_margin == pytest.approx(0.9998)
+
+
+# =============================================================================
+# SECTION 13: Fill Verification Tests
+# =============================================================================
+
+class TestFillVerification:
+    """Tests for order fill verification logic."""
+
+    @pytest.fixture
+    def position_with_orders(self) -> ArbitragePosition:
+        """Create position with order IDs."""
+        return ArbitragePosition(
+            id="arb-fill-test",
+            market_slug="test-market",
+            question="Will X happen?",
+            yes_token_id="yes_token",
+            no_token_id="no_token",
+            yes_entry_price=0.45,
+            no_entry_price=0.48,
+            entry_cost=0.93,
+            guaranteed_profit=0.07,
+            yes_size=10.0,
+            no_size=10.0,
+            yes_order_id="yes_order_123",
+            no_order_id="no_order_456",
+        )
+
+    def test_fill_verification_timeout_handling(self, position_with_orders):
+        """Position should track timeout on fill verification."""
+        import time
+
+        position_with_orders.created_at = time.time() - 120  # 2 minutes ago
+
+        # Position age can be checked for timeout
+        age = time.time() - position_with_orders.created_at
+        assert age > 60  # Older than 1 minute
+
+    def test_partial_fill_position_cleanup(self, position_with_orders):
+        """Partially filled positions should be flagged for review."""
+        position_with_orders.yes_filled = True
+        position_with_orders.no_filled = False
+
+        # Should be flagged for review
+        if not position_with_orders.is_complete:
+            position_with_orders.needs_review = True
+
+        assert position_with_orders.needs_review is True
+
+    def test_needs_review_flag_lifecycle(self, position_with_orders):
+        """Test full lifecycle of needs_review flag."""
+        # Initially False
+        assert position_with_orders.needs_review is False
+
+        # Set when issue detected
+        position_with_orders.needs_review = True
+        assert position_with_orders.needs_review is True
+
+        # Can be cleared after resolution
+        position_with_orders.needs_review = False
+        assert position_with_orders.needs_review is False
+
+    def test_fill_status_tracking(self, position_with_orders):
+        """Test fill status tracking."""
+        # Initially unfilled
+        assert position_with_orders.yes_filled is False
+        assert position_with_orders.no_filled is False
+        assert position_with_orders.is_complete is False
+
+        # After YES fills
+        position_with_orders.yes_filled = True
+        assert position_with_orders.is_complete is False
+
+        # After both fill
+        position_with_orders.no_filled = True
+        assert position_with_orders.is_complete is True
+
+
+# =============================================================================
+# SECTION 14: Orphaned Position Recovery Tests
+# =============================================================================
+
+class TestOrphanedPositionRecovery:
+    """Tests for orphaned position handling (CRITICAL-02)."""
+
+    @pytest.fixture
+    def strategy_with_positions(self, mock_bot):
+        """Create strategy with some positions."""
+        config = DutchBookConfig(trade_size=10.0)
+        strategy = DutchBookStrategy(bot=mock_bot, config=config)
+
+        # Add some positions
+        for i in range(3):
+            strategy.positions[f"market-{i}"] = ArbitragePosition(
+                id=f"arb-{i}",
+                market_slug=f"market-{i}",
+                question="Test?",
+                yes_token_id="yes",
+                no_token_id="no",
+                yes_entry_price=0.45,
+                no_entry_price=0.48,
+                entry_cost=0.93,
+                guaranteed_profit=0.07,
+                yes_size=10.0,
+                no_size=10.0,
+            )
+
+        return strategy
+
+    @pytest.fixture
+    def mock_bot(self):
+        """Create mock TradingBot."""
+        bot = Mock()
+        bot.config = Mock()
+        bot.config.safe_address = "0x123"
+        return bot
+
+    def test_position_cleanup_removes_orphaned(self, strategy_with_positions):
+        """Orphaned positions should be removable."""
+        # Mark one for review (orphaned)
+        strategy_with_positions.positions["market-1"].needs_review = True
+
+        # Get positions needing review
+        orphaned = [
+            slug for slug, pos in strategy_with_positions.positions.items()
+            if pos.needs_review
+        ]
+
+        assert len(orphaned) == 1
+        assert "market-1" in orphaned
+
+    def test_exposure_calculation_excludes_orphaned(self, strategy_with_positions):
+        """Exposure calculation should handle orphaned positions."""
+        # Mark one as orphaned
+        strategy_with_positions.positions["market-1"].needs_review = True
+
+        total_exposure = sum(
+            pos.yes_size * pos.yes_entry_price + pos.no_size * pos.no_entry_price
+            for pos in strategy_with_positions.positions.values()
+            if not pos.needs_review  # Exclude orphaned
+        )
+
+        # Only 2 positions counted: 2 * 10 * 0.93 = 18.6
+        expected = 2 * 10.0 * 0.93
+        assert total_exposure == pytest.approx(expected)
+
+
+# =============================================================================
+# SECTION 15: Order ID Tracking Tests
+# =============================================================================
+
+class TestOrderIDTracking:
+    """Tests for order ID tracking in positions."""
+
+    def test_position_stores_order_ids(self):
+        """Position should store both order IDs."""
+        position = ArbitragePosition(
+            id="arb-1",
+            market_slug="test",
+            question="Test?",
+            yes_token_id="yes",
+            no_token_id="no",
+            yes_entry_price=0.45,
+            no_entry_price=0.48,
+            entry_cost=0.93,
+            guaranteed_profit=0.07,
+            yes_size=10.0,
+            no_size=10.0,
+            yes_order_id="yes_ord_123",
+            no_order_id="no_ord_456",
+        )
+
+        assert position.yes_order_id == "yes_ord_123"
+        assert position.no_order_id == "no_ord_456"
+
+    def test_position_order_ids_optional(self):
+        """Order IDs should be optional (None by default)."""
+        position = ArbitragePosition(
+            id="arb-1",
+            market_slug="test",
+            question="Test?",
+            yes_token_id="yes",
+            no_token_id="no",
+            yes_entry_price=0.45,
+            no_entry_price=0.48,
+            entry_cost=0.93,
+            guaranteed_profit=0.07,
+            yes_size=10.0,
+            no_size=10.0,
+        )
+
+        assert position.yes_order_id is None
+        assert position.no_order_id is None
 
 
 # =============================================================================

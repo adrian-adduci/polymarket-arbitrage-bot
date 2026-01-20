@@ -1,0 +1,269 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="space-y-6">
+    <!-- Header -->
+    <div class="flex items-center justify-between">
+        <div>
+            <h1 class="text-2xl font-bold text-gray-900">Trade History</h1>
+            <p class="text-sm text-gray-500">View all executed trades and P&L</p>
+        </div>
+        <div class="flex space-x-3">
+            <a href="/api/v1/trades/export/csv"
+               class="inline-flex items-center px-4 py-2 border border-gray-300 rounded-md text-sm font-medium text-gray-700 bg-white hover:bg-gray-50">
+                <svg class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                          d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
+                </svg>
+                Export CSV
+            </a>
+        </div>
+    </div>
+
+    <!-- Stats Cards -->
+    <div id="trade-stats"
+         hx-get="/api/v1/trades/stats"
+         hx-trigger="load"
+         hx-swap="innerHTML"
+         class="grid grid-cols-1 md:grid-cols-4 gap-4">
+        <!-- Loading skeleton -->
+        <div class="card animate-pulse">
+            <div class="card-body"><div class="h-12 bg-gray-200 rounded"></div></div>
+        </div>
+        <div class="card animate-pulse">
+            <div class="card-body"><div class="h-12 bg-gray-200 rounded"></div></div>
+        </div>
+        <div class="card animate-pulse">
+            <div class="card-body"><div class="h-12 bg-gray-200 rounded"></div></div>
+        </div>
+        <div class="card animate-pulse">
+            <div class="card-body"><div class="h-12 bg-gray-200 rounded"></div></div>
+        </div>
+    </div>
+
+    <!-- Filters -->
+    <div class="card">
+        <div class="card-body py-3">
+            <div class="flex items-center space-x-4">
+                <label class="text-sm font-medium text-gray-700">Filter by status:</label>
+                <select id="status-filter"
+                        onchange="filterTrades(this.value)"
+                        class="block rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 text-sm">
+                    <option value="">All</option>
+                    <option value="pending">Pending</option>
+                    <option value="filled">Filled</option>
+                    <option value="settled">Settled</option>
+                    <option value="cancelled">Cancelled</option>
+                    <option value="failed">Failed</option>
+                </select>
+            </div>
+        </div>
+    </div>
+
+    <!-- Trades Table -->
+    <div class="card">
+        <div class="card-header">All Trades</div>
+        <div id="all-trades-table"
+             hx-get="/api/v1/trades/?limit=100"
+             hx-trigger="load"
+             hx-swap="innerHTML">
+            <div class="p-8 flex items-center justify-center">
+                <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Arbitrage Trades -->
+    <div class="card">
+        <div class="card-header">Arbitrage Pairs</div>
+        <div id="arbitrage-trades-table"
+             hx-get="/api/v1/trades/arbitrage?limit=50"
+             hx-trigger="load"
+             hx-swap="innerHTML">
+            <div class="p-8 flex items-center justify-center">
+                <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500"></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+// Handle API response and render table
+document.body.addEventListener('htmx:afterRequest', function(event) {
+    if (event.detail.pathInfo.requestPath === '/api/v1/trades/stats') {
+        try {
+            const response = JSON.parse(event.detail.xhr.responseText);
+            if (response.success && response.data) {
+                renderStatsCards(response.data);
+            }
+        } catch (e) {}
+    }
+
+    if (event.detail.pathInfo.requestPath.startsWith('/api/v1/trades/') ||
+        event.detail.pathInfo.requestPath === '/api/v1/trades/') {
+        try {
+            const response = JSON.parse(event.detail.xhr.responseText);
+            if (response.success && response.data) {
+                if (event.detail.pathInfo.requestPath.includes('arbitrage')) {
+                    renderArbitrageTable(response.data);
+                } else if (!event.detail.pathInfo.requestPath.includes('stats')) {
+                    renderTradesTable(response.data);
+                }
+            }
+        } catch (e) {}
+    }
+});
+
+function renderStatsCards(stats) {
+    const container = document.getElementById('trade-stats');
+    container.innerHTML = `
+        <div class="card">
+            <div class="card-body">
+                <div class="text-sm font-medium text-gray-500 uppercase">Total Trades</div>
+                <div class="text-2xl font-bold text-gray-900">${stats.total_trades || 0}</div>
+            </div>
+        </div>
+        <div class="card">
+            <div class="card-body">
+                <div class="text-sm font-medium text-gray-500 uppercase">Win Rate</div>
+                <div class="text-2xl font-bold text-gray-900">${((stats.win_rate || 0) * 100).toFixed(1)}%</div>
+            </div>
+        </div>
+        <div class="card">
+            <div class="card-body">
+                <div class="text-sm font-medium text-gray-500 uppercase">Total P&L</div>
+                <div class="text-2xl font-bold ${(stats.total_realized_pnl || 0) >= 0 ? 'text-green-600' : 'text-red-600'}">
+                    ${(stats.total_realized_pnl || 0) >= 0 ? '+' : ''}$${(stats.total_realized_pnl || 0).toFixed(2)}
+                </div>
+            </div>
+        </div>
+        <div class="card">
+            <div class="card-body">
+                <div class="text-sm font-medium text-gray-500 uppercase">Open Positions</div>
+                <div class="text-2xl font-bold text-gray-900">${stats.open_trades || 0}</div>
+            </div>
+        </div>
+    `;
+}
+
+function renderTradesTable(trades) {
+    const container = document.getElementById('all-trades-table');
+    if (!trades || trades.length === 0) {
+        container.innerHTML = '<div class="p-8 text-center text-gray-500">No trades found</div>';
+        return;
+    }
+
+    let html = `
+        <div class="overflow-x-auto">
+            <table class="data-table">
+                <thead>
+                    <tr>
+                        <th>Trade ID</th>
+                        <th>Market</th>
+                        <th>Side</th>
+                        <th class="text-right">Price</th>
+                        <th class="text-right">Size</th>
+                        <th class="text-right">Cost</th>
+                        <th class="text-right">P&L</th>
+                        <th>Status</th>
+                        <th>Time</th>
+                    </tr>
+                </thead>
+                <tbody>
+    `;
+
+    for (const trade of trades) {
+        const pnl = trade.realized_pnl || 0;
+        html += `
+            <tr>
+                <td class="font-mono text-xs">${trade.trade_id.substring(0, 16)}...</td>
+                <td class="max-w-xs truncate">${trade.market_slug}</td>
+                <td>
+                    <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium
+                        ${trade.side === 'YES' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}">
+                        ${trade.side}
+                    </span>
+                </td>
+                <td class="text-right font-mono text-sm">$${(trade.fill_price || trade.order_price).toFixed(4)}</td>
+                <td class="text-right font-mono text-sm">${trade.size.toFixed(2)}</td>
+                <td class="text-right font-mono text-sm">$${(trade.cost || 0).toFixed(2)}</td>
+                <td class="text-right ${pnl >= 0 ? 'text-green-600' : 'text-red-600'}">
+                    ${trade.status === 'settled' ? (pnl >= 0 ? '+' : '') + '$' + pnl.toFixed(2) : '--'}
+                </td>
+                <td>${getStatusBadge(trade.status)}</td>
+                <td class="text-xs text-gray-500">${formatTime(trade.created_at)}</td>
+            </tr>
+        `;
+    }
+
+    html += '</tbody></table></div>';
+    container.innerHTML = html;
+}
+
+function renderArbitrageTable(arbs) {
+    const container = document.getElementById('arbitrage-trades-table');
+    if (!arbs || arbs.length === 0) {
+        container.innerHTML = '<div class="p-8 text-center text-gray-500">No arbitrage trades found</div>';
+        return;
+    }
+
+    let html = `
+        <div class="overflow-x-auto">
+            <table class="data-table">
+                <thead>
+                    <tr>
+                        <th>Arb ID</th>
+                        <th>Market</th>
+                        <th class="text-right">Total Cost</th>
+                        <th class="text-right">Expected</th>
+                        <th class="text-right">Realized</th>
+                        <th>Status</th>
+                        <th>Time</th>
+                    </tr>
+                </thead>
+                <tbody>
+    `;
+
+    for (const arb of arbs) {
+        html += `
+            <tr>
+                <td class="font-mono text-xs">${arb.arb_id.substring(0, 16)}...</td>
+                <td class="max-w-xs truncate" title="${arb.question}">${arb.market_slug}</td>
+                <td class="text-right font-mono text-sm">$${(arb.total_cost || 0).toFixed(2)}</td>
+                <td class="text-right font-mono text-sm text-green-600">+$${(arb.expected_profit || 0).toFixed(2)}</td>
+                <td class="text-right ${(arb.realized_pnl || 0) >= 0 ? 'text-green-600' : 'text-red-600'}">
+                    ${arb.status === 'settled' ? (arb.realized_pnl >= 0 ? '+' : '') + '$' + (arb.realized_pnl || 0).toFixed(2) : '--'}
+                </td>
+                <td>${getStatusBadge(arb.status)}</td>
+                <td class="text-xs text-gray-500">${formatTime(arb.created_at)}</td>
+            </tr>
+        `;
+    }
+
+    html += '</tbody></table></div>';
+    container.innerHTML = html;
+}
+
+function getStatusBadge(status) {
+    const colors = {
+        pending: 'bg-yellow-100 text-yellow-800',
+        filled: 'bg-blue-100 text-blue-800',
+        settled: 'bg-green-100 text-green-800',
+        cancelled: 'bg-gray-100 text-gray-800',
+        failed: 'bg-red-100 text-red-800'
+    };
+    return `<span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${colors[status] || 'bg-gray-100 text-gray-800'}">${status}</span>`;
+}
+
+function formatTime(timestamp) {
+    if (!timestamp) return '--';
+    const date = new Date(timestamp);
+    return date.toLocaleString();
+}
+
+function filterTrades(status) {
+    const url = status ? `/api/v1/trades/?limit=100&status=${status}` : '/api/v1/trades/?limit=100';
+    htmx.ajax('GET', url, '#all-trades-table');
+}
+</script>
+{% endblock %}

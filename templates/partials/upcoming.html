@@ -1,0 +1,123 @@
+<!-- Upcoming Markets Partial -->
+{% if markets and markets|length > 0 %}
+<div class="overflow-x-auto">
+    <table class="data-table">
+        <thead>
+            <tr>
+                <th>Asset</th>
+                <th>Duration</th>
+                <th>Window Start</th>
+                <th class="text-right">Time Until</th>
+                <th>Status</th>
+                <th class="text-right">Prices</th>
+                <th>Action</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for m in markets %}
+            <tr class="{% if m.accepting_orders %}bg-green-50{% elif m.seconds_until_start < 60 %}bg-yellow-50{% endif %}">
+                <td>
+                    <div class="flex items-center space-x-2">
+                        <span class="font-semibold text-sm">{{ m.asset }}</span>
+                        {% if m.asset == 'BTC' %}
+                        <span class="w-4 h-4 rounded-full bg-orange-500"></span>
+                        {% elif m.asset == 'ETH' %}
+                        <span class="w-4 h-4 rounded-full bg-blue-500"></span>
+                        {% elif m.asset == 'SOL' %}
+                        <span class="w-4 h-4 rounded-full bg-purple-500"></span>
+                        {% else %}
+                        <span class="w-4 h-4 rounded-full bg-gray-400"></span>
+                        {% endif %}
+                    </div>
+                </td>
+                <td>
+                    <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-800">
+                        {{ m.duration }}
+                    </span>
+                </td>
+                <td class="text-sm">
+                    <div class="font-mono">{{ m.window_start_formatted }}</div>
+                    <div class="text-xs text-gray-500">{{ m.window_date }}</div>
+                </td>
+                <td class="text-right">
+                    {% if m.accepting_orders %}
+                    <span class="text-green-600 font-semibold">NOW</span>
+                    {% else %}
+                    <span class="countdown font-mono text-sm" data-seconds="{{ m.seconds_until_start }}">
+                        {{ m.countdown_display }}
+                    </span>
+                    {% endif %}
+                </td>
+                <td>
+                    {% if m.accepting_orders %}
+                    <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-800">
+                        <span class="w-1.5 h-1.5 rounded-full bg-green-500 mr-1 live-dot"></span>
+                        Live
+                    </span>
+                    {% elif m.seconds_until_start < 60 %}
+                    <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-yellow-100 text-yellow-800">
+                        Opening Soon
+                    </span>
+                    {% else %}
+                    <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-600">
+                        Scheduled
+                    </span>
+                    {% endif %}
+                </td>
+                <td class="text-right font-mono text-sm">
+                    {% if m.outcome_prices %}
+                    <span class="text-green-600">{{ "%.2f"|format(m.outcome_prices[0] * 100) }}%</span>
+                    <span class="text-gray-400">/</span>
+                    <span class="text-red-600">{{ "%.2f"|format(m.outcome_prices[1] * 100) }}%</span>
+                    {% else %}
+                    <span class="text-gray-400">--</span>
+                    {% endif %}
+                </td>
+                <td>
+                    {% if m.accepting_orders %}
+                    <button
+                        onclick="selectMarket('{{ m.slug }}')"
+                        class="inline-flex items-center px-2 py-1 text-xs font-medium text-white bg-blue-600 rounded hover:bg-blue-700">
+                        Monitor
+                    </button>
+                    {% else %}
+                    <button
+                        onclick="scheduleAlert('{{ m.slug }}', {{ m.seconds_until_start }})"
+                        class="inline-flex items-center px-2 py-1 text-xs font-medium text-gray-600 bg-gray-100 rounded hover:bg-gray-200">
+                        Alert
+                    </button>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<!-- Window Info Summary -->
+{% if window_info and window_info.windows %}
+<div class="mt-4 pt-4 border-t border-gray-100">
+    <div class="flex flex-wrap gap-4 text-xs text-gray-500">
+        {% for duration, info in window_info.windows.items() %}
+        <div class="flex items-center space-x-2">
+            <span class="font-medium text-gray-700">{{ duration }}:</span>
+            <span class="countdown-mini" data-seconds="{{ info.seconds_remaining }}">
+                {{ info.seconds_remaining // 60 }}m {{ info.seconds_remaining % 60 }}s
+            </span>
+            <span class="text-gray-400">until next</span>
+        </div>
+        {% endfor %}
+    </div>
+</div>
+{% endif %}
+
+{% else %}
+<div class="p-8 text-center">
+    <svg class="mx-auto h-12 w-12 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
+              d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>
+    </svg>
+    <p class="mt-2 text-sm text-gray-500">No upcoming markets found</p>
+    <p class="text-xs text-gray-400">Markets may not be available for the selected filters</p>
+</div>
+{% endif %}

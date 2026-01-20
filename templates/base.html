@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ title }} | Polymarket Arbitrage Bot</title>
+
+    <!-- TailwindCSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        poly: {
+                            50: '#f0f9ff',
+                            100: '#e0f2fe',
+                            500: '#3b82f6',
+                            600: '#2563eb',
+                            700: '#1d4ed8',
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+
+    <!-- htmx -->
+    <script src="https://unpkg.com/htmx.org@1.9.10"></script>
+    <script src="https://unpkg.com/htmx.org@1.9.10/dist/ext/ws.js"></script>
+
+    <!-- Custom styles -->
+    <style>
+        /* Loading indicator */
+        .htmx-request .htmx-indicator {
+            display: inline-block;
+        }
+        .htmx-indicator {
+            display: none;
+        }
+
+        /* Smooth transitions */
+        .htmx-settling {
+            transition: opacity 0.2s ease-out;
+        }
+        .htmx-swapping {
+            opacity: 0.5;
+        }
+
+        /* Status colors */
+        .status-running { color: #22c55e; }
+        .status-stopped { color: #6b7280; }
+        .status-error { color: #ef4444; }
+
+        /* Profit/loss colors */
+        .profit { color: #22c55e; }
+        .loss { color: #ef4444; }
+
+        /* Table styles */
+        .data-table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        .data-table th {
+            text-align: left;
+            padding: 0.75rem 1rem;
+            border-bottom: 1px solid #e5e7eb;
+            font-weight: 600;
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            color: #6b7280;
+        }
+        .data-table td {
+            padding: 0.75rem 1rem;
+            border-bottom: 1px solid #f3f4f6;
+        }
+        .data-table tbody tr:hover {
+            background-color: #f9fafb;
+        }
+
+        /* Card styles */
+        .card {
+            background: white;
+            border-radius: 0.5rem;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+        .card-header {
+            padding: 1rem 1.5rem;
+            border-bottom: 1px solid #e5e7eb;
+            font-weight: 600;
+        }
+        .card-body {
+            padding: 1.5rem;
+        }
+
+        /* Pulse animation for live indicator */
+        @keyframes pulse-dot {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+        .live-dot {
+            animation: pulse-dot 2s ease-in-out infinite;
+        }
+    </style>
+</head>
+<body class="h-full bg-gray-50">
+    <div class="min-h-full">
+        <!-- Navigation -->
+        <nav class="bg-white shadow-sm border-b border-gray-200">
+            <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+                <div class="flex justify-between h-16">
+                    <div class="flex items-center">
+                        <a href="/" class="flex items-center">
+                            <span class="text-xl font-bold text-gray-900">Polymarket</span>
+                            <span class="ml-2 text-sm text-gray-500">Arbitrage Bot</span>
+                        </a>
+                        <div class="hidden md:flex ml-10 space-x-4">
+                            <a href="/"
+                               class="{% if request.url.path == '/' %}bg-gray-100 text-gray-900{% else %}text-gray-600 hover:text-gray-900{% endif %} px-3 py-2 rounded-md text-sm font-medium">
+                                Dashboard
+                            </a>
+                            <a href="/trades"
+                               class="{% if request.url.path == '/trades' %}bg-gray-100 text-gray-900{% else %}text-gray-600 hover:text-gray-900{% endif %} px-3 py-2 rounded-md text-sm font-medium">
+                                Trades
+                            </a>
+                            <a href="/research"
+                               class="{% if request.url.path == '/research' %}bg-gray-100 text-gray-900{% else %}text-gray-600 hover:text-gray-900{% endif %} px-3 py-2 rounded-md text-sm font-medium">
+                                Research
+                            </a>
+                        </div>
+                    </div>
+                    <div class="flex items-center space-x-4">
+                        <!-- Status indicator -->
+                        <div id="connection-status" class="flex items-center text-sm">
+                            <span class="w-2 h-2 rounded-full bg-gray-400 mr-2"></span>
+                            <span class="text-gray-500">Connecting...</span>
+                        </div>
+                        <!-- Settings button -->
+                        <button
+                            onclick="openSettingsModal()"
+                            class="p-2 text-gray-500 hover:text-gray-700 rounded-md hover:bg-gray-100"
+                            title="Settings">
+                            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                      d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/>
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                      d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
+                            </svg>
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </nav>
+
+        <!-- Main content -->
+        <main class="max-w-7xl mx-auto py-6 px-4 sm:px-6 lg:px-8">
+            {% block content %}{% endblock %}
+        </main>
+    </div>
+
+    <!-- Settings Modal -->
+    <div id="settings-modal" class="hidden fixed inset-0 z-50 overflow-y-auto">
+        <div class="flex items-center justify-center min-h-screen px-4">
+            <div class="fixed inset-0 bg-black opacity-50" onclick="closeSettingsModal()"></div>
+            <div class="relative bg-white rounded-lg shadow-xl max-w-md w-full">
+                <div class="flex items-center justify-between p-4 border-b">
+                    <h3 class="text-lg font-semibold">Settings</h3>
+                    <button onclick="closeSettingsModal()" class="text-gray-400 hover:text-gray-600">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+                        </svg>
+                    </button>
+                </div>
+                <div id="settings-content" class="p-4"
+                     hx-get="/api/v1/trading/settings"
+                     hx-trigger="load"
+                     hx-target="this">
+                    <div class="flex items-center justify-center h-32">
+                        <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- JavaScript -->
+    <script>
+        // Settings modal functions
+        function openSettingsModal() {
+            document.getElementById('settings-modal').classList.remove('hidden');
+            htmx.trigger('#settings-content', 'load');
+        }
+
+        function closeSettingsModal() {
+            document.getElementById('settings-modal').classList.add('hidden');
+        }
+
+        // WebSocket connection for real-time updates
+        let ws = null;
+        let reconnectAttempts = 0;
+        const maxReconnectAttempts = 5;
+
+        function connectWebSocket() {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${protocol}//${window.location.host}/ws/status`;
+
+            ws = new WebSocket(wsUrl);
+
+            ws.onopen = function() {
+                console.log('WebSocket connected');
+                reconnectAttempts = 0;
+                updateConnectionStatus(true);
+            };
+
+            ws.onclose = function() {
+                console.log('WebSocket disconnected');
+                updateConnectionStatus(false);
+
+                // Reconnect with backoff
+                if (reconnectAttempts < maxReconnectAttempts) {
+                    const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000);
+                    reconnectAttempts++;
+                    setTimeout(connectWebSocket, delay);
+                }
+            };
+
+            ws.onerror = function(error) {
+                console.error('WebSocket error:', error);
+            };
+
+            ws.onmessage = function(event) {
+                const data = JSON.parse(event.data);
+                handleWebSocketMessage(data);
+            };
+
+            // Keep-alive ping
+            setInterval(function() {
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send('ping');
+                }
+            }, 25000);
+        }
+
+        function updateConnectionStatus(connected) {
+            const status = document.getElementById('connection-status');
+            if (connected) {
+                status.innerHTML = `
+                    <span class="w-2 h-2 rounded-full bg-green-500 mr-2 live-dot"></span>
+                    <span class="text-green-600">Live</span>
+                `;
+            } else {
+                status.innerHTML = `
+                    <span class="w-2 h-2 rounded-full bg-gray-400 mr-2"></span>
+                    <span class="text-gray-500">Disconnected</span>
+                `;
+            }
+        }
+
+        function handleWebSocketMessage(data) {
+            if (data.type === 'status_update') {
+                // Refresh status panel
+                htmx.trigger('#status-panel', 'refresh');
+            } else if (data.type === 'opportunity') {
+                // Refresh opportunities table
+                htmx.trigger('#opportunities-table', 'refresh');
+                // Show notification
+                showNotification('New opportunity detected!', 'info');
+            } else if (data.type === 'trade') {
+                // Refresh trades table
+                htmx.trigger('#trades-table', 'refresh');
+                showNotification('Trade executed!', 'success');
+            }
+        }
+
+        function showNotification(message, type = 'info') {
+            // Simple notification - could be enhanced with a toast library
+            console.log(`[${type}] ${message}`);
+        }
+
+        // Format numbers
+        function formatCurrency(value) {
+            return new Intl.NumberFormat('en-US', {
+                style: 'currency',
+                currency: 'USD'
+            }).format(value);
+        }
+
+        function formatPercent(value) {
+            return (value * 100).toFixed(2) + '%';
+        }
+
+        // Initialize
+        document.addEventListener('DOMContentLoaded', function() {
+            connectWebSocket();
+        });
+
+        // Handle htmx events
+        document.body.addEventListener('htmx:afterSwap', function(event) {
+            // Re-initialize any dynamic elements after htmx swap
+        });
+
+        // Close modal on escape key
+        document.addEventListener('keydown', function(event) {
+            if (event.key === 'Escape') {
+                closeSettingsModal();
+            }
+        });
+    </script>
+
+    {% block scripts %}{% endblock %}
+</body>
+</html>

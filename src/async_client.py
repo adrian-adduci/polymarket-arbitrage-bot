@@ -1,30 +1,26 @@
 """
-Client Module - API Clients for Polymarket
+Async Client Module - Native aiohttp Clients for Polymarket
 
-Provides clients for interacting with:
-- CLOB (Central Limit Order Book) API
-- Builder Relayer API
+Provides high-performance async HTTP clients for low-latency trading.
+Eliminates thread pool overhead by using native async/await patterns.
 
 Features:
-- Gasless transactions via Builder Program
-- HMAC authentication for Builder APIs
-- Automatic retry and error handling
+- Native aiohttp with connection pooling
+- Pre-cached HMAC secrets for fast authentication
+- Single JSON serialization (no double encoding)
+- Shared session for connection reuse
 
 Example:
-    from src.client import ClobClient, RelayerClient
+    from src.async_client import AsyncClobClient
 
-    clob = ClobClient(
+    async with AsyncClobClient(
         host="https://clob.polymarket.com",
         chain_id=137,
         signature_type=2,
         funder="0x..."
-    )
-
-    relayer = RelayerClient(
-        host="https://relayer-v2.polymarket.com",
-        chain_id=137,
-        builder_creds=builder_creds
-    )
+    ) as client:
+        orderbook = await client.get_order_book("token_id")
+        result = await client.post_order(signed_order)
 """
 
 import time
@@ -32,101 +28,107 @@ import hmac
 import hashlib
 import base64
 import json
+import logging
 from typing import Optional, Dict, Any, List
-from dataclasses import dataclass
 
-import requests
+try:
+    import aiohttp
+    AIOHTTP_AVAILABLE = True
+except ImportError:
+    AIOHTTP_AVAILABLE = False
+    aiohttp = None
 
 from .config import BuilderConfig
-from .http import ThreadLocalSessionMixin
+from .client import ApiCredentials, ApiError, AuthenticationError
+
+logger = logging.getLogger(__name__)
 
 
-class ApiError(Exception):
-    """Base exception for API errors."""
-    pass
-
-
-class AuthenticationError(ApiError):
-    """Raised when authentication fails."""
-    pass
-
-
-class OrderError(ApiError):
-    """Raised when order operations fail."""
-    pass
-
-
-@dataclass
-class ApiCredentials:
-    """User-level API credentials for CLOB."""
-    api_key: str
-    secret: str
-    passphrase: str
-
-    @classmethod
-    def load(cls, filepath: str) -> "ApiCredentials":
-        """Load credentials from JSON file."""
-        with open(filepath, 'r') as f:
-            data = json.load(f)
-        return cls(
-            api_key=data.get("apiKey", ""),
-            secret=data.get("secret", ""),
-            passphrase=data.get("passphrase", ""),
-        )
-
-    def is_valid(self) -> bool:
-        """Check if credentials are valid."""
-        return bool(self.api_key and self.secret and self.passphrase)
-
-
-class ApiClient(ThreadLocalSessionMixin):
+class AsyncApiClient:
     """
-    Base HTTP client with common functionality.
+    Base async HTTP client with aiohttp.
 
     Provides:
+    - Shared aiohttp.ClientSession with connection pooling
     - Automatic JSON handling
-    - Request/response logging
-    - Error handling
+    - Error handling with retries
     """
 
     def __init__(
         self,
         base_url: str,
         timeout: int = 30,
-        retry_count: int = 3
+        retry_count: int = 3,
+        pool_size: int = 100
     ):
         """
-        Initialize API client.
+        Initialize async API client.
 
         Args:
             base_url: Base URL for all requests
             timeout: Request timeout in seconds
             retry_count: Number of retries on failure
+            pool_size: Connection pool size for keep-alive
         """
-        super().__init__()
-        self.base_url = base_url.rstrip('/')
-        self.timeout = timeout
-        self.retry_count = retry_count
+        if not AIOHTTP_AVAILABLE:
+            raise ImportError("aiohttp is required for AsyncApiClient. Install with: pip install aiohttp")
 
-    def _request(
+        self.base_url = base_url.rstrip('/')
+        self.timeout = aiohttp.ClientTimeout(total=timeout)
+        self.retry_count = retry_count
+        self.pool_size = pool_size
+
+        # Session will be created on first use or via context manager
+        self._session: Optional[aiohttp.ClientSession] = None
+        self._owns_session = False
+
+    async def _get_session(self) -> aiohttp.ClientSession:
+        """Get or create the aiohttp session."""
+        if self._session is None or self._session.closed:
+            connector = aiohttp.TCPConnector(
+                limit=self.pool_size,
+                keepalive_timeout=30,
+                enable_cleanup_closed=True
+            )
+            self._session = aiohttp.ClientSession(
+                timeout=self.timeout,
+                connector=connector
+            )
+            self._owns_session = True
+        return self._session
+
+    async def close(self) -> None:
+        """Close the aiohttp session."""
+        if self._session and self._owns_session and not self._session.closed:
+            await self._session.close()
+            self._session = None
+
+    async def __aenter__(self):
+        """Async context manager entry."""
+        await self._get_session()
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Async context manager exit."""
+        await self.close()
+
+    async def _request(
         self,
         method: str,
         endpoint: str,
-        data: Optional[Any] = None,
+        data: Optional[str] = None,
         headers: Optional[Dict] = None,
-        params: Optional[Dict] = None,
-        is_json_str: bool = False
+        params: Optional[Dict] = None
     ) -> Dict[str, Any]:
         """
-        Make HTTP request with error handling.
+        Make async HTTP request with error handling.
 
         Args:
             method: HTTP method (GET, POST, etc.)
             endpoint: API endpoint
-            data: Request body data (dict or pre-serialized JSON string)
+            data: Pre-serialized JSON body (to avoid double serialization)
             headers: Additional headers
             params: Query parameters
-            is_json_str: If True, data is already a JSON string (avoids double serialization)
 
         Returns:
             Response JSON data
@@ -140,69 +142,48 @@ class ApiClient(ThreadLocalSessionMixin):
         if headers:
             request_headers.update(headers)
 
+        session = await self._get_session()
         last_error = None
+
         for attempt in range(self.retry_count):
             try:
-                session = self.session
-                if method.upper() == "GET":
-                    response = session.get(
-                        url, headers=request_headers,
-                        params=params, timeout=self.timeout
-                    )
-                elif method.upper() == "POST":
-                    if is_json_str:
-                        # Data is already serialized JSON - use data= instead of json=
-                        response = session.post(
-                            url, headers=request_headers,
-                            data=data, params=params, timeout=self.timeout
-                        )
-                    else:
-                        response = session.post(
-                            url, headers=request_headers,
-                            json=data, params=params, timeout=self.timeout
-                        )
-                elif method.upper() == "DELETE":
-                    if is_json_str:
-                        response = session.delete(
-                            url, headers=request_headers,
-                            data=data, params=params, timeout=self.timeout
-                        )
-                    else:
-                        response = session.delete(
-                            url, headers=request_headers,
-                            json=data, params=params, timeout=self.timeout
-                        )
-                else:
-                    raise ApiError(f"Unsupported method: {method}")
+                async with session.request(
+                    method,
+                    url,
+                    data=data,
+                    headers=request_headers,
+                    params=params
+                ) as response:
+                    response.raise_for_status()
+                    text = await response.text()
+                    return json.loads(text) if text else {}
 
-                response.raise_for_status()
-                return response.json() if response.text else {}
-
-            except requests.exceptions.RequestException as e:
+            except aiohttp.ClientError as e:
                 last_error = e
                 if attempt < self.retry_count - 1:
-                    time.sleep(2 ** attempt)  # Exponential backoff
+                    import asyncio
+                    await asyncio.sleep(2 ** attempt)  # Exponential backoff
 
         raise ApiError(f"Request failed after {self.retry_count} attempts: {last_error}")
 
 
-class ClobClient(ApiClient):
+class AsyncClobClient(AsyncApiClient):
     """
-    Client for Polymarket CLOB (Central Limit Order Book) API.
+    Async client for Polymarket CLOB (Central Limit Order Book) API.
 
-    Features:
-    - Order placement and cancellation
-    - Order book queries
-    - Trade history
-    - Builder attribution support
+    High-performance async HTTP client with:
+    - Native aiohttp (no thread pool overhead)
+    - Pre-cached HMAC secrets
+    - Single JSON serialization
 
     Example:
-        client = ClobClient(
+        async with AsyncClobClient(
             host="https://clob.polymarket.com",
             chain_id=137,
             signature_type=2,
             funder="0x..."
-        )
+        ) as client:
+            orderbook = await client.get_order_book("token_id")
     """
 
     def __init__(
@@ -216,7 +197,7 @@ class ClobClient(ApiClient):
         timeout: int = 30
     ):
         """
-        Initialize CLOB client.
+        Initialize async CLOB client.
 
         Args:
             host: CLOB API host
@@ -253,6 +234,11 @@ class ClobClient(ApiClient):
             except Exception:
                 self._cached_api_secret = self.api_creds.secret.encode()
 
+    def set_api_creds(self, creds: ApiCredentials) -> None:
+        """Set API credentials for authenticated requests."""
+        self.api_creds = creds
+        self._cache_secrets()
+
     def _build_headers(
         self,
         method: str,
@@ -260,14 +246,12 @@ class ClobClient(ApiClient):
         body: str = ""
     ) -> Dict[str, str]:
         """
-        Build authentication headers.
-
-        Supports both user API credentials and Builder credentials.
+        Build authentication headers using cached secrets.
 
         Args:
             method: HTTP method
             path: Request path
-            body: Request body
+            body: Request body (pre-serialized JSON)
 
         Returns:
             Dictionary of headers
@@ -315,98 +299,7 @@ class ClobClient(ApiClient):
 
         return headers
 
-    def derive_api_key(self, signer: "OrderSigner", nonce: int = 0) -> ApiCredentials:
-        """
-        Derive L2 API credentials using L1 EIP-712 authentication.
-
-        This is required to access authenticated endpoints like
-        /orders and /trades.
-
-        Args:
-            signer: OrderSigner instance with private key
-            nonce: Nonce for the auth message (default 0)
-
-        Returns:
-            ApiCredentials with api_key, secret, and passphrase
-        """
-        timestamp = str(int(time.time()))
-
-        # Sign the auth message using EIP-712
-        auth_signature = signer.sign_auth_message(timestamp=timestamp, nonce=nonce)
-
-        # L1 headers
-        headers = {
-            "POLY_ADDRESS": signer.address,
-            "POLY_SIGNATURE": auth_signature,
-            "POLY_TIMESTAMP": timestamp,
-            "POLY_NONCE": str(nonce),
-        }
-
-        response = self._request("GET", "/auth/derive-api-key", headers=headers)
-
-        return ApiCredentials(
-            api_key=response.get("apiKey", ""),
-            secret=response.get("secret", ""),
-            passphrase=response.get("passphrase", ""),
-        )
-
-    def create_api_key(self, signer: "OrderSigner", nonce: int = 0) -> ApiCredentials:
-        """
-        Create new L2 API credentials using L1 EIP-712 authentication.
-
-        Use this if derive_api_key fails (first time setup).
-
-        Args:
-            signer: OrderSigner instance with private key
-            nonce: Nonce for the auth message (default 0)
-
-        Returns:
-            ApiCredentials with api_key, secret, and passphrase
-        """
-        timestamp = str(int(time.time()))
-
-        # Sign the auth message using EIP-712
-        auth_signature = signer.sign_auth_message(timestamp=timestamp, nonce=nonce)
-
-        # L1 headers
-        headers = {
-            "POLY_ADDRESS": signer.address,
-            "POLY_SIGNATURE": auth_signature,
-            "POLY_TIMESTAMP": timestamp,
-            "POLY_NONCE": str(nonce),
-        }
-
-        response = self._request("POST", "/auth/api-key", headers=headers)
-
-        return ApiCredentials(
-            api_key=response.get("apiKey", ""),
-            secret=response.get("secret", ""),
-            passphrase=response.get("passphrase", ""),
-        )
-
-    def create_or_derive_api_key(self, signer: "OrderSigner", nonce: int = 0) -> ApiCredentials:
-        """
-        Create API credentials if not exists, otherwise derive them.
-
-        Args:
-            signer: OrderSigner instance with private key
-            nonce: Nonce for the auth message (default 0)
-
-        Returns:
-            ApiCredentials with api_key, secret, and passphrase
-        """
-        try:
-            return self.create_api_key(signer, nonce)
-        except Exception:
-            return self.derive_api_key(signer, nonce)
-
-    def set_api_creds(self, creds: ApiCredentials) -> None:
-        """Set API credentials for authenticated requests."""
-        self.api_creds = creds
-        # Re-cache the secret for the new credentials
-        self._cache_secrets()
-
-    def get_order_book(self, token_id: str) -> Dict[str, Any]:
+    async def get_order_book(self, token_id: str) -> Dict[str, Any]:
         """
         Get order book for a token.
 
@@ -416,13 +309,13 @@ class ClobClient(ApiClient):
         Returns:
             Order book data
         """
-        return self._request(
+        return await self._request(
             "GET",
             "/book",
             params={"token_id": token_id}
         )
 
-    def get_market_price(self, token_id: str) -> Dict[str, Any]:
+    async def get_market_price(self, token_id: str) -> Dict[str, Any]:
         """
         Get current market price for a token.
 
@@ -432,13 +325,13 @@ class ClobClient(ApiClient):
         Returns:
             Price data
         """
-        return self._request(
+        return await self._request(
             "GET",
             "/price",
             params={"token_id": token_id}
         )
 
-    def get_open_orders(self) -> List[Dict[str, Any]]:
+    async def get_open_orders(self) -> List[Dict[str, Any]]:
         """
         Get all open orders for the funder.
 
@@ -446,10 +339,9 @@ class ClobClient(ApiClient):
             List of open orders
         """
         endpoint = "/data/orders"
-
         headers = self._build_headers("GET", endpoint)
 
-        result = self._request(
+        result = await self._request(
             "GET",
             endpoint,
             headers=headers
@@ -460,7 +352,7 @@ class ClobClient(ApiClient):
             return result.get("data", [])
         return result if isinstance(result, list) else []
 
-    def get_order(self, order_id: str) -> Dict[str, Any]:
+    async def get_order(self, order_id: str) -> Dict[str, Any]:
         """
         Get order by ID.
 
@@ -472,9 +364,9 @@ class ClobClient(ApiClient):
         """
         endpoint = f"/data/order/{order_id}"
         headers = self._build_headers("GET", endpoint)
-        return self._request("GET", endpoint, headers=headers)
+        return await self._request("GET", endpoint, headers=headers)
 
-    def get_trades(
+    async def get_trades(
         self,
         token_id: Optional[str] = None,
         limit: int = 100
@@ -495,7 +387,7 @@ class ClobClient(ApiClient):
         if token_id:
             params["token_id"] = token_id
 
-        result = self._request(
+        result = await self._request(
             "GET",
             endpoint,
             headers=headers,
@@ -507,7 +399,7 @@ class ClobClient(ApiClient):
             return result.get("data", [])
         return result if isinstance(result, list) else []
 
-    def post_order(
+    async def post_order(
         self,
         signed_order: Dict[str, Any],
         order_type: str = "GTC"
@@ -535,19 +427,18 @@ class ClobClient(ApiClient):
         if "signature" in signed_order:
             body["signature"] = signed_order["signature"]
 
+        # Single JSON serialization
         body_json = json.dumps(body, separators=(',', ':'))
         headers = self._build_headers("POST", endpoint, body_json)
 
-        # Pass pre-serialized JSON to avoid double serialization
-        return self._request(
+        return await self._request(
             "POST",
             endpoint,
             data=body_json,
-            headers=headers,
-            is_json_str=True
+            headers=headers
         )
 
-    def cancel_order(self, order_id: str) -> Dict[str, Any]:
+    async def cancel_order(self, order_id: str) -> Dict[str, Any]:
         """
         Cancel an order.
 
@@ -562,16 +453,14 @@ class ClobClient(ApiClient):
         body_json = json.dumps(body, separators=(',', ':'))
         headers = self._build_headers("DELETE", endpoint, body_json)
 
-        # Pass pre-serialized JSON to avoid double serialization
-        return self._request(
+        return await self._request(
             "DELETE",
             endpoint,
             data=body_json,
-            headers=headers,
-            is_json_str=True
+            headers=headers
         )
 
-    def cancel_orders(self, order_ids: List[str]) -> Dict[str, Any]:
+    async def cancel_orders(self, order_ids: List[str]) -> Dict[str, Any]:
         """
         Cancel multiple orders by their IDs.
 
@@ -585,16 +474,14 @@ class ClobClient(ApiClient):
         body_json = json.dumps(order_ids, separators=(',', ':'))
         headers = self._build_headers("DELETE", endpoint, body_json)
 
-        # Pass pre-serialized JSON to avoid double serialization
-        return self._request(
+        return await self._request(
             "DELETE",
             endpoint,
             data=body_json,
-            headers=headers,
-            is_json_str=True
+            headers=headers
         )
 
-    def cancel_all_orders(self) -> Dict[str, Any]:
+    async def cancel_all_orders(self) -> Dict[str, Any]:
         """
         Cancel all open orders.
 
@@ -604,13 +491,13 @@ class ClobClient(ApiClient):
         endpoint = "/cancel-all"
         headers = self._build_headers("DELETE", endpoint)
 
-        return self._request(
+        return await self._request(
             "DELETE",
             endpoint,
             headers=headers
         )
 
-    def cancel_market_orders(
+    async def cancel_market_orders(
         self,
         market: Optional[str] = None,
         asset_id: Optional[str] = None
@@ -636,29 +523,20 @@ class ClobClient(ApiClient):
         body_json = json.dumps(body, separators=(',', ':')) if body else ""
         headers = self._build_headers("DELETE", endpoint, body_json)
 
-        # Pass pre-serialized JSON to avoid double serialization
-        return self._request(
+        return await self._request(
             "DELETE",
             endpoint,
             data=body_json if body else None,
-            headers=headers,
-            is_json_str=bool(body)
+            headers=headers
         )
 
 
-class RelayerClient(ApiClient):
+class AsyncRelayerClient(AsyncApiClient):
     """
-    Client for Builder Relayer API.
+    Async client for Builder Relayer API.
 
     Provides gasless transactions through Polymarket's
-    relayer infrastructure.
-
-    Example:
-        client = RelayerClient(
-            host="https://relayer-v2.polymarket.com",
-            chain_id=137,
-            builder_creds=builder_creds
-        )
+    relayer infrastructure with native async HTTP.
     """
 
     def __init__(
@@ -670,7 +548,7 @@ class RelayerClient(ApiClient):
         timeout: int = 60
     ):
         """
-        Initialize Relayer client.
+        Initialize async Relayer client.
 
         Args:
             host: Relayer API host
@@ -715,7 +593,7 @@ class RelayerClient(ApiClient):
             "POLY_BUILDER_SIGNATURE": signature,
         }
 
-    def deploy_safe(self, safe_address: str) -> Dict[str, Any]:
+    async def deploy_safe(self, safe_address: str) -> Dict[str, Any]:
         """
         Deploy a Safe proxy wallet.
 
@@ -730,16 +608,14 @@ class RelayerClient(ApiClient):
         body_json = json.dumps(body, separators=(',', ':'))
         headers = self._build_headers("POST", endpoint, body_json)
 
-        # Pass pre-serialized JSON to avoid double serialization
-        return self._request(
+        return await self._request(
             "POST",
             endpoint,
             data=body_json,
-            headers=headers,
-            is_json_str=True
+            headers=headers
         )
 
-    def approve_usdc(
+    async def approve_usdc(
         self,
         safe_address: str,
         spender: str,
@@ -765,16 +641,14 @@ class RelayerClient(ApiClient):
         body_json = json.dumps(body, separators=(',', ':'))
         headers = self._build_headers("POST", endpoint, body_json)
 
-        # Pass pre-serialized JSON to avoid double serialization
-        return self._request(
+        return await self._request(
             "POST",
             endpoint,
             data=body_json,
-            headers=headers,
-            is_json_str=True
+            headers=headers
         )
 
-    def approve_token(
+    async def approve_token(
         self,
         safe_address: str,
         token_id: str,
@@ -803,11 +677,9 @@ class RelayerClient(ApiClient):
         body_json = json.dumps(body, separators=(',', ':'))
         headers = self._build_headers("POST", endpoint, body_json)
 
-        # Pass pre-serialized JSON to avoid double serialization
-        return self._request(
+        return await self._request(
             "POST",
             endpoint,
             data=body_json,
-            headers=headers,
-            is_json_str=True
+            headers=headers
         )

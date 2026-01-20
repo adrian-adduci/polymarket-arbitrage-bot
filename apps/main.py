@@ -8,6 +8,13 @@ Usage:
     # Interactive mode (recommended)
     python apps/main.py
 
+    # Web API mode - launch dashboard
+    python apps/main.py --api
+    python apps/main.py --api --port 8000
+
+    # Headless mode - background trading
+    python apps/main.py --headless --strategy dutch-book
+
     # CLI mode - direct strategy execution
     python apps/main.py --strategy dutch-book --dry-run
     python apps/main.py --strategy signals --markets btc,eth
@@ -16,6 +23,8 @@ Usage:
 Features:
     - Single entry point for all trading strategies
     - Interactive menus with keyboard navigation
+    - Web dashboard with real-time updates (--api mode)
+    - Headless background trading (--headless mode)
     - Unified market selection across all strategies
     - AI/ML signal integration (optional)
     - Configuration builder with sensible defaults
@@ -567,6 +576,65 @@ class TradingLauncher:
         await self._execute_strategy(strategy, markets, config)
 
 
+def run_api_server(args):
+    """Start the FastAPI web server."""
+    try:
+        import uvicorn
+        from api.main import app
+    except ImportError as e:
+        print(f"{Colors.RED}Error: API dependencies not installed.{Colors.RESET}")
+        print("Install with: pip install fastapi uvicorn[standard] aiosqlite")
+        print(f"Details: {e}")
+        sys.exit(1)
+
+    print(f"\n{Colors.BOLD}Starting Web Dashboard...{Colors.RESET}")
+    print(f"  URL: http://{args.host}:{args.port}")
+    print(f"  API: http://{args.host}:{args.port}/api/v1/")
+    print()
+
+    uvicorn.run(
+        "api.main:app",
+        host=args.host,
+        port=args.port,
+        reload=args.reload,
+        log_level="info" if not args.debug else "debug",
+    )
+
+
+async def run_headless(args):
+    """Run trading in headless mode (background, no UI)."""
+    from db.connection import get_database
+    from api.services.trading_service import TradingService
+
+    print(f"\n{Colors.BOLD}Starting Headless Trading...{Colors.RESET}")
+    print(f"  Strategy: {args.strategy}")
+    print(f"  Mode: {'DRY RUN' if not args.live else 'LIVE'}")
+    print()
+
+    # Initialize database and trading service
+    db = await get_database()
+    trading = TradingService(db)
+
+    try:
+        # Start trading
+        await trading.start(
+            strategy=args.strategy,
+            dry_run=not args.live,
+            trade_size=args.size,
+            threshold=args.threshold,
+        )
+
+        # Run trading loop
+        await trading.run_trading_loop()
+
+    except KeyboardInterrupt:
+        print(f"\n{Colors.YELLOW}Shutting down...{Colors.RESET}")
+    finally:
+        await trading.stop("Headless mode stopped")
+        from db.connection import close_database
+        await close_database()
+
+
 def main():
     """Main entry point."""
     parser = argparse.ArgumentParser(
@@ -576,6 +644,13 @@ def main():
 Examples:
     # Interactive mode (recommended)
     python apps/main.py
+
+    # Web dashboard mode
+    python apps/main.py --api
+    python apps/main.py --api --port 8080
+
+    # Headless background trading
+    python apps/main.py --headless --strategy dutch-book --live
 
     # CLI mode - Dutch Book
     python apps/main.py --strategy dutch-book --dry-run
@@ -588,6 +663,37 @@ Examples:
         """,
     )
 
+    # Mode selection
+    parser.add_argument(
+        "--api",
+        action="store_true",
+        help="Start web dashboard (FastAPI + htmx)",
+    )
+    parser.add_argument(
+        "--headless",
+        action="store_true",
+        help="Run in headless mode (no UI, background trading)",
+    )
+
+    # API server options
+    parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="API server host (default: 127.0.0.1)",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=8000,
+        help="API server port (default: 8000)",
+    )
+    parser.add_argument(
+        "--reload",
+        action="store_true",
+        help="Enable auto-reload for development",
+    )
+
+    # Strategy options
     parser.add_argument(
         "--strategy",
         choices=["dutch-book", "flash-crash", "signals", "test-trade"],
@@ -638,19 +744,29 @@ Examples:
         import logging
         logging.basicConfig(level=logging.DEBUG)
 
-    # Run launcher
-    launcher = TradingLauncher()
-
-    try:
-        asyncio.run(launcher.run(args))
-    except KeyboardInterrupt:
-        print("\nExiting...")
-    except Exception as e:
-        print(f"\n{Colors.RED}Error: {e}{Colors.RESET}")
-        if args.debug:
-            import traceback
-            traceback.print_exc()
-        sys.exit(1)
+    # Route to appropriate mode
+    if args.api:
+        # Web API mode
+        run_api_server(args)
+    elif args.headless:
+        # Headless mode
+        if not args.strategy:
+            print(f"{Colors.RED}Error: --strategy required for headless mode{Colors.RESET}")
+            sys.exit(1)
+        asyncio.run(run_headless(args))
+    else:
+        # Interactive or CLI mode
+        launcher = TradingLauncher()
+        try:
+            asyncio.run(launcher.run(args))
+        except KeyboardInterrupt:
+            print("\nExiting...")
+        except Exception as e:
+            print(f"\n{Colors.RED}Error: {e}{Colors.RESET}")
+            if args.debug:
+                import traceback
+                traceback.print_exc()
+            sys.exit(1)
 
 
 if __name__ == "__main__":

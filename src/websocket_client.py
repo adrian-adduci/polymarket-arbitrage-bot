@@ -246,6 +246,10 @@ class MarketWebSocket:
         self._running = False
         self._subscribed_assets: Set[str] = set()
 
+        # Message queue for backpressure handling (prevents message loss under load)
+        self._message_queue: asyncio.Queue = asyncio.Queue(maxsize=1000)
+        self._processor_task: Optional[asyncio.Task] = None
+
         # Orderbook cache
         self._orderbooks: Dict[str, OrderbookSnapshot] = {}
 
@@ -505,7 +509,7 @@ class MarketWebSocket:
             logger.error(f"Error in {label} callback: {e}")
 
     async def _run_loop(self) -> None:
-        """Main message processing loop."""
+        """Main message receiving loop - pushes to queue for processing."""
         msg_count = 0
         while self._running and self.is_connected:
             try:
@@ -519,26 +523,62 @@ class MarketWebSocket:
                 if msg_count <= 5 or msg_count % 1000 == 0:
                     logger.info(f"WS message #{msg_count}: {message[:200] if len(message) > 200 else message}")
 
-                data = json.loads(message)
-
-                # Handle array of messages
-                if isinstance(data, list):
-                    for item in data:
-                        await self._handle_message(item)
-                else:
-                    await self._handle_message(data)
+                # Push to queue (non-blocking if queue is full, drop oldest)
+                try:
+                    self._message_queue.put_nowait(message)
+                except asyncio.QueueFull:
+                    # Queue full - drop oldest message to prevent blocking
+                    try:
+                        self._message_queue.get_nowait()
+                        self._message_queue.put_nowait(message)
+                    except asyncio.QueueEmpty:
+                        pass
 
             except asyncio.TimeoutError:
                 logger.warning("WebSocket receive timeout")
             except self._connection_closed as e:
                 logger.warning(f"WebSocket connection closed: {e}")
                 break
-            except json.JSONDecodeError as e:
-                logger.error(f"Failed to parse message: {e}")
             except Exception as e:
-                logger.error(f"Error processing message: {e}")
+                logger.error(f"Error receiving message: {e}")
                 if self._on_error:
                     self._on_error(e)
+
+    async def _process_messages(self) -> None:
+        """Process messages from the queue - runs in parallel with receive loop."""
+        while self._running:
+            try:
+                # Wait for message with timeout to allow checking _running flag
+                try:
+                    message = await asyncio.wait_for(
+                        self._message_queue.get(),
+                        timeout=1.0
+                    )
+                except asyncio.TimeoutError:
+                    continue
+
+                # Parse and handle message
+                try:
+                    data = json.loads(message)
+
+                    # Handle array of messages
+                    if isinstance(data, list):
+                        for item in data:
+                            await self._handle_message(item)
+                    else:
+                        await self._handle_message(data)
+
+                except json.JSONDecodeError as e:
+                    logger.error(f"Failed to parse message: {e}")
+                except Exception as e:
+                    logger.error(f"Error processing message: {e}")
+                    if self._on_error:
+                        self._on_error(e)
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Error in message processor: {e}")
 
     async def run(self, auto_reconnect: bool = True) -> None:
         """
@@ -553,8 +593,10 @@ class MarketWebSocket:
             # Connect
             if not await self.connect():
                 if auto_reconnect:
-                    logger.info(f"Reconnecting in {self.reconnect_interval}s...")
-                    await asyncio.sleep(self.reconnect_interval)
+                    # Fast reconnect for HFT (1 second instead of 5)
+                    reconnect_delay = min(self.reconnect_interval, 1.0)
+                    logger.info(f"Reconnecting in {reconnect_delay}s...")
+                    await asyncio.sleep(reconnect_delay)
                     continue
                 else:
                     break
@@ -564,8 +606,27 @@ class MarketWebSocket:
                 logger.info(f"Sending subscription for {len(self._subscribed_assets)} assets after connect")
                 await self.subscribe(list(self._subscribed_assets))
 
-            # Run message loop
+            # Start message processor task
+            self._processor_task = asyncio.create_task(self._process_messages())
+
+            # Run message receive loop
             await self._run_loop()
+
+            # Stop processor task
+            if self._processor_task:
+                self._processor_task.cancel()
+                try:
+                    await self._processor_task
+                except asyncio.CancelledError:
+                    pass
+                self._processor_task = None
+
+            # Clear message queue on disconnect
+            while not self._message_queue.empty():
+                try:
+                    self._message_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
 
             # Handle disconnect
             if self._on_disconnect:
@@ -575,8 +636,10 @@ class MarketWebSocket:
                 break
 
             if auto_reconnect:
-                logger.info(f"Reconnecting in {self.reconnect_interval}s...")
-                await asyncio.sleep(self.reconnect_interval)
+                # Fast reconnect for HFT (1 second instead of 5)
+                reconnect_delay = min(self.reconnect_interval, 1.0)
+                logger.info(f"Reconnecting in {reconnect_delay}s...")
+                await asyncio.sleep(reconnect_delay)
             else:
                 break
 

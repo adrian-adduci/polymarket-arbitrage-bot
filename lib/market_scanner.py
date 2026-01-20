@@ -152,19 +152,41 @@ class MarketScanner(ThreadLocalSessionMixin):
         logger.info(f"Fetched {len(all_markets)} active markets")
         return all_markets[:max_markets]
 
-    def _parse_json_field(self, value: Any) -> List[Any]:
-        """Parse a field that may be a JSON string or a list."""
+    def _parse_json_field(self, value: Any, field_name: str = "unknown") -> List[Any]:
+        """
+        Parse a field that may be a JSON string or a list.
+
+        Args:
+            value: The value to parse (string or list)
+            field_name: Name of the field for error reporting
+
+        Returns:
+            Parsed list
+
+        Raises:
+            ValueError: If string value cannot be parsed as valid JSON
+        """
         if isinstance(value, str):
             try:
-                return json.loads(value)
-            except json.JSONDecodeError:
-                return []
+                parsed = json.loads(value)
+                if not isinstance(parsed, list):
+                    logger.warning(f"Field '{field_name}' parsed but not a list: {type(parsed)}")
+                    return []
+                return parsed
+            except json.JSONDecodeError as e:
+                # Log and raise instead of silently returning empty
+                logger.warning(f"Failed to parse JSON field '{field_name}': {e} - value: {value[:100] if len(value) > 100 else value}")
+                raise ValueError(f"Invalid JSON in field '{field_name}': {e}")
         return value if isinstance(value, list) else []
 
     def _is_binary_market(self, market: Dict[str, Any]) -> bool:
         """Check if market has exactly 2 outcomes."""
-        outcomes = self._parse_json_field(market.get("outcomes", "[]"))
-        token_ids = self._parse_json_field(market.get("clobTokenIds", "[]"))
+        try:
+            outcomes = self._parse_json_field(market.get("outcomes", "[]"), "outcomes")
+            token_ids = self._parse_json_field(market.get("clobTokenIds", "[]"), "clobTokenIds")
+        except ValueError:
+            # Invalid JSON in market data - skip this market
+            return False
 
         return (
             len(outcomes) == 2
@@ -183,9 +205,9 @@ class MarketScanner(ThreadLocalSessionMixin):
             BinaryMarket or None if parsing fails
         """
         try:
-            outcomes = self._parse_json_field(market.get("outcomes", "[]"))
-            token_ids = self._parse_json_field(market.get("clobTokenIds", "[]"))
-            outcome_prices = self._parse_json_field(market.get("outcomePrices", "[]"))
+            outcomes = self._parse_json_field(market.get("outcomes", "[]"), "outcomes")
+            token_ids = self._parse_json_field(market.get("clobTokenIds", "[]"), "clobTokenIds")
+            outcome_prices = self._parse_json_field(market.get("outcomePrices", "[]"), "outcomePrices")
 
             # Convert prices to floats
             prices = []

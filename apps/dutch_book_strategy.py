@@ -33,6 +33,7 @@ from typing import Optional, List, Dict, Any
 from lib.terminal_utils import log
 from lib.market_scanner import MarketScanner, BinaryMarket
 from lib.dutch_book_detector import DutchBookDetector, ArbitrageOpportunity
+from lib.fast_monitor import FastMarketMonitor
 from src.bot import TradingBot
 
 
@@ -111,7 +112,11 @@ class DutchBookConfig:
     max_total_exposure: float = 1000.0  # Maximum USD across all positions
     max_daily_loss: float = 100.0  # Stop trading after this loss amount
     price_buffer_percent: float = 0.02  # 2% buffer above ask price (instead of fixed +0.01)
-    fill_check_interval: float = 1.0  # Seconds between fill status checks
+    fill_check_interval: float = 0.1  # Seconds between fill status checks (100ms for HFT)
+
+    # WebSocket mode (low-latency)
+    use_websocket: bool = True  # Use WebSocket for real-time orderbook updates
+    max_orderbook_staleness_ms: float = 500.0  # Reject opportunities with stale data
 
 
 class DutchBookStrategy:
@@ -144,6 +149,9 @@ class DutchBookStrategy:
         # Concurrency control for orderbook fetching
         self.orderbook_semaphore = asyncio.Semaphore(20)  # Max 20 concurrent requests
 
+        # WebSocket monitor (initialized lazily when needed)
+        self.monitor: Optional[FastMarketMonitor] = None
+
         # State
         self.running = False
         self.positions: Dict[str, ArbitragePosition] = {}
@@ -160,8 +168,26 @@ class DutchBookStrategy:
 
     @property
     def can_open_position(self) -> bool:
-        """Check if we can open a new arbitrage position."""
-        return len(self.positions) < self.config.max_concurrent_arbs
+        """
+        Check if we can open a new arbitrage position.
+
+        Excludes positions marked for review (orphaned/partial fills)
+        from the count to prevent memory leak.
+        """
+        active_positions = sum(
+            1 for p in self.positions.values() if not p.needs_review
+        )
+        return active_positions < self.config.max_concurrent_arbs
+
+    @property
+    def active_position_count(self) -> int:
+        """Count of active positions (excluding those needing review)."""
+        return sum(1 for p in self.positions.values() if not p.needs_review)
+
+    @property
+    def orphaned_position_count(self) -> int:
+        """Count of orphaned positions (needing review)."""
+        return sum(1 for p in self.positions.values() if p.needs_review)
 
     def _reset_daily_stats_if_needed(self) -> None:
         """Reset daily stats at midnight UTC."""
@@ -174,11 +200,52 @@ class DutchBookStrategy:
             self.daily_start_time = time.time()
 
     def get_current_exposure(self) -> float:
-        """Calculate total current exposure across all positions."""
+        """
+        Calculate total current exposure across all active positions.
+
+        Excludes positions marked for review (orphaned/partial fills)
+        to prevent incorrect exposure calculations.
+        """
         return sum(
             p.yes_size * p.yes_entry_price + p.no_size * p.no_entry_price
             for p in self.positions.values()
+            if not p.needs_review  # CRITICAL-02 fix: exclude orphaned positions
         )
+
+    def cleanup_orphaned_positions(self, max_age_seconds: float = 3600.0) -> int:
+        """
+        Remove orphaned positions older than max_age_seconds.
+
+        CRITICAL-02 fix: Prevents memory leak from accumulated orphaned positions.
+        Orphaned positions are those with needs_review=True that have been stuck
+        for longer than the max age.
+
+        Args:
+            max_age_seconds: Maximum age before removing orphaned position (default 1 hour)
+
+        Returns:
+            Number of positions cleaned up
+        """
+        current_time = time.time()
+        to_remove = []
+
+        for slug, position in self.positions.items():
+            if position.needs_review:
+                position_age = current_time - position.created_at
+                if position_age > max_age_seconds:
+                    to_remove.append(slug)
+                    log(
+                        f"Cleaning up orphaned position {slug} (age: {position_age:.0f}s)",
+                        "warning"
+                    )
+
+        for slug in to_remove:
+            del self.positions[slug]
+
+        if to_remove:
+            log(f"Cleaned up {len(to_remove)} orphaned positions", "info")
+
+        return len(to_remove)
 
     def _check_exposure_limits(self, opportunity: ArbitrageOpportunity, size: float) -> bool:
         """
@@ -265,31 +332,39 @@ class DutchBookStrategy:
         """
         Verify order fills with timeout.
 
-        Polls order status until both sides are filled or timeout.
+        Polls order status in parallel until both sides are filled or timeout.
         On timeout, attempts to cancel unfilled orders and marks position for review.
         """
         start_time = time.time()
 
         while time.time() - start_time < self.config.order_timeout:
-            # Check YES order status
+            # Fetch both order statuses in parallel for lower latency
+            tasks = []
             if not position.yes_filled and position.yes_order_id:
-                try:
-                    yes_order = await self.bot.get_order(position.yes_order_id)
-                    if yes_order and yes_order.get("status") == "MATCHED":
-                        position.yes_filled = True
-                        log(f"YES order filled: {position.yes_order_id}", "success")
-                except Exception as e:
-                    log(f"Error checking YES order: {e}", "debug")
-
-            # Check NO order status
+                tasks.append(("yes", self.bot.get_order(position.yes_order_id)))
             if not position.no_filled and position.no_order_id:
-                try:
-                    no_order = await self.bot.get_order(position.no_order_id)
-                    if no_order and no_order.get("status") == "MATCHED":
-                        position.no_filled = True
-                        log(f"NO order filled: {position.no_order_id}", "success")
-                except Exception as e:
-                    log(f"Error checking NO order: {e}", "debug")
+                tasks.append(("no", self.bot.get_order(position.no_order_id)))
+
+            if tasks:
+                # Execute parallel fetch
+                results = await asyncio.gather(
+                    *[t[1] for t in tasks],
+                    return_exceptions=True
+                )
+
+                # Process results
+                for (side, _), result in zip(tasks, results):
+                    if isinstance(result, Exception):
+                        log(f"Error checking {side.upper()} order: {result}", "debug")
+                        continue
+
+                    if result and result.get("status") == "MATCHED":
+                        if side == "yes":
+                            position.yes_filled = True
+                            log(f"YES order filled: {position.yes_order_id}", "success")
+                        else:
+                            position.no_filled = True
+                            log(f"NO order filled: {position.no_order_id}", "success")
 
             # Check if both filled
             if position.is_complete:
@@ -424,10 +499,10 @@ class DutchBookStrategy:
 
     async def execute_arbitrage(self, opportunity: ArbitrageOpportunity) -> bool:
         """
-        Execute a Dutch Book arbitrage trade.
+        Execute a Dutch Book arbitrage trade with atomic execution.
 
-        Places BUY orders on both YES and NO outcomes in parallel
-        to minimize race condition window.
+        Signs both orders BEFORE submission, then submits them in parallel
+        to minimize the time gap between order placements.
 
         Args:
             opportunity: ArbitrageOpportunity to execute
@@ -469,22 +544,31 @@ class DutchBookStrategy:
             "trade"
         )
 
-        # Place both orders in parallel to minimize race condition window
-        yes_order_coro = self.bot.place_order(
-            token_id=opportunity.yes_token_id,
-            price=yes_price,
-            size=size,
-            side="BUY"
-        )
-        no_order_coro = self.bot.place_order(
-            token_id=opportunity.no_token_id,
-            price=no_price,
-            size=size,
-            side="BUY"
-        )
+        # ATOMIC EXECUTION: Sign both orders BEFORE submission
+        # This minimizes the time gap between order placements
+        try:
+            yes_signed = self.bot.sign_order(
+                token_id=opportunity.yes_token_id,
+                price=yes_price,
+                size=size,
+                side="BUY"
+            )
+            no_signed = self.bot.sign_order(
+                token_id=opportunity.no_token_id,
+                price=no_price,
+                size=size,
+                side="BUY"
+            )
+        except Exception as e:
+            log(f"Failed to sign orders: {e}", "error")
+            return False
 
-        # Execute in parallel
-        results = await asyncio.gather(yes_order_coro, no_order_coro, return_exceptions=True)
+        # Submit both pre-signed orders in parallel (minimal gap)
+        yes_submit_coro = self.bot.submit_signed_order(yes_signed)
+        no_submit_coro = self.bot.submit_signed_order(no_signed)
+
+        # Execute submissions in parallel
+        results = await asyncio.gather(yes_submit_coro, no_submit_coro, return_exceptions=True)
         yes_result, no_result = results
 
         # Handle exceptions from parallel execution
@@ -551,18 +635,34 @@ class DutchBookStrategy:
         return True
 
     async def run(self) -> None:
-        """Main strategy loop."""
+        """Main strategy loop - automatically selects WebSocket or REST mode."""
+        if self.config.use_websocket:
+            await self.run_websocket_mode()
+        else:
+            await self.run_rest_mode()
+
+    async def run_rest_mode(self) -> None:
+        """REST polling mode - slower but simpler."""
         self.running = True
 
         log("=" * 60, "info")
-        log("Dutch Book Arbitrage Strategy Started", "success")
+        log("Dutch Book Arbitrage Strategy Started (REST Mode)", "success")
         log(f"Trade size: ${self.config.trade_size:.2f}", "info")
         log(f"Min profit margin: {self.config.min_profit_margin:.1%}", "info")
         log(f"Dry run: {self.config.dry_run}", "info")
         log("=" * 60, "info")
 
+        cleanup_counter = 0
+        cleanup_interval = 12  # Run cleanup every 12 scans (approx every minute at 5s interval)
+
         try:
             while self.running:
+                # CRITICAL-02 fix: Periodically cleanup orphaned positions
+                cleanup_counter += 1
+                if cleanup_counter >= cleanup_interval:
+                    self.cleanup_orphaned_positions()
+                    cleanup_counter = 0
+
                 # Scan for opportunities
                 opportunities = await self.scan_all_markets()
 
@@ -590,6 +690,106 @@ class DutchBookStrategy:
         finally:
             self.running = False
             self._print_summary()
+
+    async def run_websocket_mode(self) -> None:
+        """
+        WebSocket mode - low-latency real-time monitoring.
+
+        Uses WebSocket push for orderbook updates instead of REST polling.
+        Detection latency: ~5-40ms vs ~300-900ms for REST.
+        """
+        self.running = True
+
+        log("=" * 60, "info")
+        log("Dutch Book Arbitrage Strategy Started (WebSocket Mode)", "success")
+        log(f"Trade size: ${self.config.trade_size:.2f}", "info")
+        log(f"Min profit margin: {self.config.min_profit_margin:.1%}", "info")
+        log(f"Max staleness: {self.config.max_orderbook_staleness_ms}ms", "info")
+        log(f"Dry run: {self.config.dry_run}", "info")
+        log("=" * 60, "info")
+
+        # Get markets to monitor
+        log("Fetching markets to monitor...", "info")
+        if self.config.include_crypto_only:
+            markets = self.scanner.get_crypto_updown_markets()
+        else:
+            markets = self.scanner.get_active_binary_markets(
+                min_liquidity=self.config.min_liquidity,
+                min_volume=self.config.min_volume,
+                max_markets=self.config.max_markets_per_scan,
+            )
+
+        if not markets:
+            log("No markets found to monitor", "error")
+            return
+
+        log(f"Monitoring {len(markets)} markets via WebSocket", "info")
+
+        # Initialize WebSocket monitor
+        self.monitor = FastMarketMonitor(
+            markets=markets,
+            min_profit_margin=self.config.min_profit_margin,
+            fee_buffer=self.config.fee_buffer,
+            min_liquidity=self.config.min_liquidity,
+        )
+
+        # Set up opportunity callback
+        @self.monitor.on_opportunity
+        async def on_opportunity(opp: ArbitrageOpportunity):
+            await self._handle_websocket_opportunity(opp)
+
+        # Set up connection callbacks
+        @self.monitor.on_connect
+        def on_connect():
+            log("WebSocket connected - monitoring for opportunities", "success")
+
+        @self.monitor.on_disconnect
+        def on_disconnect():
+            log("WebSocket disconnected - attempting reconnect...", "warning")
+
+        try:
+            # Run the WebSocket monitor
+            await self.monitor.run_forever()
+
+        except KeyboardInterrupt:
+            log("Strategy stopped by user", "warning")
+        except Exception as e:
+            log(f"Strategy error: {e}", "error")
+        finally:
+            self.running = False
+            if self.monitor:
+                await self.monitor.stop()
+            self._print_summary()
+
+    async def _handle_websocket_opportunity(self, opp: ArbitrageOpportunity) -> None:
+        """Handle opportunity detected via WebSocket with staleness check."""
+        # Check if we can open a new position
+        if not self.can_open_position:
+            return
+
+        # Skip if we already have a position in this market
+        if opp.market_slug in self.positions:
+            return
+
+        # Staleness check - verify orderbook data is fresh
+        if self.monitor:
+            monitored = self.monitor.get_market(opp.market_slug)
+            if monitored:
+                age_ms = monitored.age_ms
+                if age_ms > self.config.max_orderbook_staleness_ms:
+                    log(f"Skipping stale opportunity: {opp.market_slug} (age: {age_ms:.0f}ms)", "debug")
+                    return
+
+        self.opportunities_found += 1
+        log(
+            f"[WS] Opportunity: {opp.market_slug} | "
+            f"Combined: {opp.combined_cost:.4f} | "
+            f"Profit: {opp.profit_percent:.2f}%",
+            "trade"
+        )
+
+        # Execute immediately
+        await self.execute_arbitrage(opp)
 
     def _print_status(self) -> None:
         """Print current status."""

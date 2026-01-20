@@ -1,14 +1,22 @@
 """
-Crypto Updown Market Scanner - Fetch active crypto 15m up/down markets.
+Crypto Updown Market Scanner - Fetch active crypto up/down markets.
 
 These markets are NOT returned by the general /markets endpoint.
-They must be fetched via /events/slug/{asset}-updown-15m-{timestamp}.
+They must be fetched via /events/slug/{asset}-updown-{duration}-{timestamp}.
+
+Supports multiple durations: 15m, 30m, 1h, 24h
 
 Example:
     from lib.crypto_updown_scanner import CryptoUpdownScanner
 
     scanner = CryptoUpdownScanner()
     markets = scanner.get_active_updown_markets()
+
+    # Get upcoming markets for future windows
+    upcoming = scanner.get_upcoming_markets_multi(
+        durations=["15m", "30m", "1h"],
+        num_windows=3
+    )
 
     for market in markets:
         print(f"{market.question}: Liquidity ${market.liquidity:,.0f}")
@@ -17,6 +25,7 @@ Example:
 import time
 import logging
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import List, Optional, Dict, Any
 
 from lib.market_scanner import BinaryMarket
@@ -25,12 +34,37 @@ from src.http import ThreadLocalSessionMixin
 logger = logging.getLogger(__name__)
 
 
+# Duration configurations: name -> interval in seconds
+DURATIONS = {
+    "15m": 15 * 60,      # 900 seconds
+    "30m": 30 * 60,      # 1800 seconds
+    "1h": 60 * 60,       # 3600 seconds
+    "24h": 24 * 60 * 60, # 86400 seconds
+}
+
+
+@dataclass
+class UpcomingMarket:
+    """Extended market info with window timing."""
+
+    market: BinaryMarket
+    duration: str
+    window_start: datetime
+    window_end: datetime
+    is_future: bool  # True if not yet accepting orders
+    seconds_until_start: int
+
+    @property
+    def window_start_unix(self) -> int:
+        return int(self.window_start.timestamp())
+
+
 @dataclass
 class CryptoUpdownConfig:
     """Configuration for crypto updown scanner."""
 
     assets: List[str] = field(default_factory=lambda: ["btc", "eth", "sol"])
-    interval_seconds: int = 900  # 15 minutes
+    interval_seconds: int = 900  # 15 minutes (for backwards compatibility)
     host: str = "https://gamma-api.polymarket.com"
     timeout: int = 10
 
@@ -263,5 +297,161 @@ class CryptoUpdownScanner(ThreadLocalSessionMixin):
             "window_end": next_ts,
             "seconds_remaining": remaining,
             "interval_seconds": self.config.interval_seconds,
+            "assets": self.config.assets,
+        }
+
+    # =========================================================================
+    # Multi-Duration Support
+    # =========================================================================
+
+    def _get_window_timestamp_for_duration(
+        self, duration: str, offset_windows: int = 0
+    ) -> int:
+        """
+        Get timestamp for a specific duration's window.
+
+        Args:
+            duration: Duration name ("15m", "30m", "1h", "24h")
+            offset_windows: Number of windows to offset (0=current, 1=next, etc.)
+
+        Returns:
+            Unix timestamp rounded to the window boundary
+        """
+        interval = DURATIONS.get(duration, 900)
+        current_ts = int(time.time())
+        base_window = (current_ts // interval) * interval
+        return base_window + (offset_windows * interval)
+
+    def _build_slug_for_duration(
+        self, asset: str, duration: str, timestamp: int
+    ) -> str:
+        """
+        Build event slug for a specific duration.
+
+        Args:
+            asset: Asset symbol (btc, eth, sol)
+            duration: Duration name ("15m", "30m", "1h", "24h")
+            timestamp: Unix timestamp rounded to interval
+
+        Returns:
+            Event slug like "btc-updown-15m-1768509000"
+        """
+        return f"{asset}-updown-{duration}-{timestamp}"
+
+    def get_upcoming_markets_multi(
+        self,
+        durations: Optional[List[str]] = None,
+        num_windows: int = 3,
+        assets: Optional[List[str]] = None,
+        include_current: bool = True,
+    ) -> List[UpcomingMarket]:
+        """
+        Get markets for multiple durations and future time windows.
+
+        Args:
+            durations: List of durations to check (defaults to ["15m", "30m", "1h"])
+            num_windows: How many future windows to fetch per duration
+            assets: List of assets to check (defaults to config assets)
+            include_current: Whether to include the current window (window 0)
+
+        Returns:
+            List of UpcomingMarket objects sorted by window start time
+        """
+        if durations is None:
+            durations = ["15m", "30m", "1h"]
+        if assets is None:
+            assets = self.config.assets
+
+        upcoming_markets = []
+        current_time = int(time.time())
+
+        start_offset = 0 if include_current else 1
+        end_offset = num_windows + (0 if include_current else 1)
+
+        for duration in durations:
+            if duration not in DURATIONS:
+                logger.warning(f"Unknown duration: {duration}, skipping")
+                continue
+
+            interval = DURATIONS[duration]
+
+            for window_offset in range(start_offset, end_offset):
+                window_ts = self._get_window_timestamp_for_duration(
+                    duration, window_offset
+                )
+                window_end_ts = window_ts + interval
+
+                for asset in assets:
+                    slug = self._build_slug_for_duration(asset, duration, window_ts)
+                    event = self._fetch_event(slug)
+
+                    if event:
+                        market = self._parse_market_from_event(event)
+                        if market:
+                            # Calculate timing info
+                            seconds_until_start = max(0, window_ts - current_time)
+                            is_future = not market.accepting_orders
+
+                            upcoming_market = UpcomingMarket(
+                                market=market,
+                                duration=duration,
+                                window_start=datetime.fromtimestamp(
+                                    window_ts, tz=timezone.utc
+                                ),
+                                window_end=datetime.fromtimestamp(
+                                    window_end_ts, tz=timezone.utc
+                                ),
+                                is_future=is_future,
+                                seconds_until_start=seconds_until_start,
+                            )
+                            upcoming_markets.append(upcoming_market)
+                            logger.debug(
+                                f"Found {asset.upper()} {duration} market: "
+                                f"window_start={window_ts}, accepting={market.accepting_orders}"
+                            )
+
+        # Sort by window start time
+        upcoming_markets.sort(key=lambda m: (m.window_start, m.duration, m.market.slug))
+
+        return upcoming_markets
+
+    def get_window_info_multi(self, durations: Optional[List[str]] = None) -> Dict[str, Any]:
+        """
+        Get window information for multiple durations.
+
+        Args:
+            durations: List of durations to check
+
+        Returns:
+            Dict with window info per duration
+        """
+        if durations is None:
+            durations = ["15m", "30m", "1h", "24h"]
+
+        current_time = int(time.time())
+        windows = {}
+
+        for duration in durations:
+            if duration not in DURATIONS:
+                continue
+
+            interval = DURATIONS[duration]
+            current_window = self._get_window_timestamp_for_duration(duration, 0)
+            next_window = self._get_window_timestamp_for_duration(duration, 1)
+
+            windows[duration] = {
+                "interval_seconds": interval,
+                "current_window_start": current_window,
+                "current_window_end": next_window,
+                "next_window_start": next_window,
+                "seconds_remaining": next_window - current_time,
+            }
+
+        return {
+            "current_time": current_time,
+            "current_time_iso": datetime.fromtimestamp(
+                current_time, tz=timezone.utc
+            ).isoformat(),
+            "windows": windows,
             "assets": self.config.assets,
         }
